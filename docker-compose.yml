@@ -1,0 +1,25 @@
+services:
+  emby-whisper:
+    build:
+      context: .
+    container_name: emby-whisper
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Stockholm
+    volumes:
+      # Media (read-write — writes .srt files alongside videos)
+      - /mnt/media6tb/emby_media:/media
+      # Appdata
+      - /mnt/docker/appdata/emby-whisper/config.yml:/app/config.yml:ro
+      - /mnt/docker/appdata/emby-whisper/state.json:/app/state.json
+      # Model cache (survives container rebuilds)
+      - /mnt/docker/appdata/emby-whisper/models:/root/.cache/huggingface
+      # Thermal sensors (read-only)
+      - /sys/class/thermal:/sys/class/thermal:ro
+      - /sys/class/hwmon:/sys/class/hwmon:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "3.0"    # max 3 of 4 cores — leave headroom for OS + other containers
+    restart: "no"

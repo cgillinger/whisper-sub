@@ -1,0 +1,45 @@
+# emby-whisper configuration
+# Mount this file read-only at /app/config.yml inside the container.
+
+# Directories to scan (container paths as mapped in docker-compose.yml)
+scan_paths:
+  - /media/Emby
+  - /media/EgenFilm1
+
+# Whisper settings
+model: large-v3
+device: cpu
+compute_type: int8
+
+# Language logic
+# Minimum detection confidence to treat audio as Swedish.
+# Below this threshold the file is translated to English instead.
+swedish_threshold: 0.7
+default_task: translate    # action when language is not Swedish: translate to English
+
+# Video file extensions to include
+video_extensions:
+  - .mp4
+  - .mkv
+  - .avi
+  - .m4v
+  - .mov
+  - .wmv
+  - .ts
+
+# Behaviour
+skip_if_subtitle_exists: true
+max_files_per_run: 0       # 0 = unlimited
+
+# Thermal throttling
+# The container reads temperatures from bind-mounted sysfs paths:
+#   CPU:  /sys/class/thermal/thermal_zone*  (zone type: x86_pkg_temp / coretemp)
+#   NVMe: /sys/class/hwmon/hwmon*           (hwmon name contains "nvme")
+# Values in sysfs are millidegrees Celsius (e.g. 72000 = 72 °C).
+thermal:
+  enabled: true
+  cpu_pause_temp: 72       # pause queue when CPU  >= this °C
+  nvme_pause_temp: 70      # pause queue when NVMe >= this °C
+  resume_temp: 65          # resume when BOTH sensors drop below this °C
+  check_interval: 30       # seconds between temperature checks during transcription
+  max_pause_minutes: 30    # abort current file if paused longer than this
