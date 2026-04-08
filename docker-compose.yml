@@ -18,6 +18,13 @@ services:
       # Thermal sensors (read-only)
       - /sys/class/thermal:/sys/class/thermal:ro
       - /sys/class/hwmon:/sys/class/hwmon:ro
+    # Intel iGPU passthrough for OpenVINO acceleration (UHD 730).
+    # The render node is shared with Immich ML; schedule runs to avoid overlap.
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - "video"
+      - "render"
     deploy:
       resources:
         limits:

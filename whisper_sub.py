@@ -394,7 +394,12 @@ def transcribe_file(
 
 
 def load_model(model_name: str, device: str, compute_type: str):
-    """Load a faster-whisper WhisperModel."""
+    """Load a faster-whisper WhisperModel.
+
+    When *device* is ``"openvino"`` and loading fails (e.g. unsupported model
+    or missing OpenVINO runtime), falls back to CPU automatically so that
+    KB-Whisper and other HF models degrade gracefully.
+    """
     from faster_whisper import WhisperModel
 
     logger.info(
@@ -403,6 +408,18 @@ def load_model(model_name: str, device: str, compute_type: str):
         device,
         compute_type,
     )
+
+    if device == "openvino":
+        try:
+            return WhisperModel(model_name, device=device, compute_type=compute_type)
+        except Exception as exc:
+            logger.warning(
+                "OpenVINO failed for model=%s (%s). Falling back to CPU.",
+                model_name,
+                exc,
+            )
+            return WhisperModel(model_name, device="cpu", compute_type=compute_type)
+
     return WhisperModel(model_name, device=device, compute_type=compute_type)
 
 
@@ -1003,7 +1020,7 @@ def _add_model_args(parser: argparse.ArgumentParser, defaults: bool = True) -> N
     parser.add_argument(
         "--device",
         default=default_device,
-        choices=["cpu", "cuda", "auto"],
+        choices=["cpu", "cuda", "openvino", "auto"],
         help="Compute device.",
     )
     parser.add_argument(

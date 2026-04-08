@@ -20,7 +20,12 @@ scan_paths:
 default_model: large-v3
 swedish_model: KBLab/whisper-large-v3-swedish
 
-device: cpu
+# OpenVINO (Phase 5): uses the Intel iGPU (UHD 730) for 2-4x faster
+# transcription.  Requires /dev/dri/renderD128 passed through in
+# docker-compose.yml.  Falls back to CPU automatically if OpenVINO fails
+# for a specific model (e.g. KB-Whisper on first run).
+# Set to "cpu" to disable OpenVINO acceleration.
+device: openvino
 compute_type: int8
 
 # Language logic
