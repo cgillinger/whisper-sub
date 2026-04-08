@@ -24,6 +24,8 @@ chown -R whisper:whisper "${HF_HOME:-/root/.cache/huggingface}"
 # Drop privileges and run the scan.
 # gosu handles the exec so the Python process is PID 1's direct child and
 # receives signals (SIGTERM from docker stop) correctly.
+# "$@" passes any extra arguments (e.g. --limit 5) to the scan subcommand.
 exec gosu whisper python /app/whisper_sub.py scan \
     --config /app/config.yml \
-    --state-file /app/state.json
+    --state-file /app/state.json \
+    "$@"
