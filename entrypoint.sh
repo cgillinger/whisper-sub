@@ -25,21 +25,13 @@ chown -R whisper:whisper "${HF_HOME:-/root/.cache/huggingface}"
 # gosu handles the exec so the Python process is PID 1's direct child and
 # receives signals (SIGTERM from docker stop) correctly.
 #
-# Dispatch logic:
-#   No args / extra flags only  →  default "scan" with config + state file
-#     docker compose run --rm emby-whisper
-#     docker compose run --rm emby-whisper --limit 5
-#   First arg is a subcommand   →  pass everything through as-is
-#     docker compose run --rm emby-whisper transcribe /media/film.mkv
-#     docker compose run --rm emby-whisper scan /media/Movies --dry-run
-case "${1:-}" in
-    scan|transcribe)
-        exec gosu whisper python /app/whisper_sub.py "$@"
-        ;;
-    *)
-        exec gosu whisper python /app/whisper_sub.py scan \
-            --config /app/config.yml \
-            --state-file /app/state.json \
-            "$@"
-        ;;
-esac
+# No arguments → default scheduled scan with config + state file.
+# Any arguments → passed through as-is (e.g. "transcribe /media/film.mkv",
+#                 "scan /media/Movies --dry-run").
+if [ $# -eq 0 ]; then
+    exec gosu whisper python /app/whisper_sub.py scan \
+        --config /app/config.yml \
+        --state-file /app/state.json
+else
+    exec gosu whisper python /app/whisper_sub.py "$@"
+fi

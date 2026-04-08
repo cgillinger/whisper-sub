@@ -1285,13 +1285,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ------------------------------------------------------------------
     # Single-file mode (no subcommand) — args on the main parser
+    # NOTE: no top-level "path" positional here; the legacy positional path
+    # is handled by the sf_parser pre-detection in main() before argparse
+    # ever sees it.  Adding a top-level "path" positional causes argparse to
+    # overwrite the transcribe subcommand's own "path" with None.
     # ------------------------------------------------------------------
-    parser.add_argument(
-        "path",
-        nargs="?",
-        type=Path,
-        help="Path to a video file (single-file mode).",
-    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -1341,10 +1339,8 @@ def main() -> None:
     elif args.command == "transcribe":
         sys.exit(cmd_transcribe(args))
     else:
-        if args.path is None:
-            parser.print_help()
-            sys.exit(1)
-        sys.exit(cmd_transcribe(args))
+        parser.print_help()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
