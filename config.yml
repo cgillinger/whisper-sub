@@ -1,10 +1,27 @@
 # emby-whisper configuration
 # Mount this file read-only at /app/config.yml inside the container.
 
-# Directories to scan (container paths as mapped in docker-compose.yml)
+# Directories to scan (container paths as mapped in docker-compose.yml).
+#
+# Phase 6 — per-path settings:
+#   min_confidence    — minimum detection confidence to treat audio as Swedish;
+#                       below threshold default_language is used if set.
+#   vad_filter        — Voice Activity Detection: skip silence, reduce
+#                       hallucinations (recommended for home videos).
+#   min_silence_duration — seconds of silence that VAD treats as a break (default 0.5).
+#   default_language  — language code assumed when confidence < min_confidence.
+#
+# Legacy format (plain strings) is still accepted:
+#   scan_paths:
+#     - /media/Emby
 scan_paths:
-  - /media/Emby
-  - /media/EgenFilm1
+  - path: /media/Emby
+    min_confidence: 0.7
+  - path: /media/EgenFilm1
+    min_confidence: 0.5      # lower threshold for home videos
+    vad_filter: true
+    min_silence_duration: 0.5
+    default_language: sv     # assume Swedish when Whisper is unsure
 
 # Whisper settings
 #

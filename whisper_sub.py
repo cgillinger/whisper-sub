@@ -16,6 +16,12 @@ KB-Whisper (Phase 4):
     Pass 1 — detect language for all queued files (default_model)
     Pass 2a — transcribe Swedish files          (swedish_model)
     Pass 2b — translate non-Swedish files       (default_model)
+
+Home-video adaptations (Phase 6):
+  Per-path settings in config scan_paths override global defaults:
+    vad_filter        — skip silence, reduce hallucinations
+    min_confidence    — confidence threshold below which default_language is used
+    default_language  — fallback language when detection confidence is low
 """
 
 import argparse
@@ -25,6 +31,7 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -306,6 +313,65 @@ def load_config(config_path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Per-path configuration (Phase 6 — home-video adaptations)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PathConfig:
+    """Per-scan-path settings for VAD, confidence threshold, and language override.
+
+    When ``min_confidence`` is None the global ``swedish_threshold`` is used.
+    """
+
+    path: Path
+    min_confidence: Optional[float] = None
+    vad_filter: bool = False
+    min_silence_duration: float = 0.5   # seconds; converted to ms for faster-whisper
+    default_language: Optional[str] = None  # language code used when confidence is low
+
+
+def parse_scan_paths(raw: list) -> list[tuple[Path, "PathConfig"]]:
+    """Parse the *scan_paths* list from config into (Path, PathConfig) pairs.
+
+    Supports both the legacy string format and the Phase-6 dict format:
+
+    Legacy (string)::
+
+        scan_paths:
+          - /media/Emby
+
+    Per-path dict::
+
+        scan_paths:
+          - path: /media/Emby
+            min_confidence: 0.7
+          - path: /media/EgenFilm1
+            min_confidence: 0.5
+            vad_filter: true
+            default_language: sv
+    """
+    result: list[tuple[Path, PathConfig]] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            p = Path(entry)
+            result.append((p, PathConfig(path=p)))
+        elif isinstance(entry, dict):
+            p = Path(entry["path"])
+            cfg = PathConfig(
+                path=p,
+                min_confidence=entry.get("min_confidence"),
+                vad_filter=bool(entry.get("vad_filter", False)),
+                min_silence_duration=float(entry.get("min_silence_duration", 0.5)),
+                default_language=entry.get("default_language"),
+            )
+            result.append((p, cfg))
+        else:
+            logger.warning("Ignoring unrecognised scan_paths entry: %r", entry)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Whisper helpers
 # ---------------------------------------------------------------------------
 
@@ -337,16 +403,40 @@ def detect_file_language(
     model,
     video_path: Path,
     swedish_threshold: float = 0.0,
+    path_config: Optional[PathConfig] = None,
 ) -> dict:
     """Detect language for a single file and determine the appropriate task.
 
+    Per-path settings (Phase 6):
+    - ``path_config.min_confidence`` overrides *swedish_threshold* for this file.
+    - When detection confidence is below the threshold and
+      ``path_config.default_language`` is set, the default language is used
+      instead of the detected one (useful for home videos where audio quality
+      is poor and Whisper may misidentify the language).
+
     Returns a dict with keys: language, probability, task, suffix.
-    Extracted from _process_one to support the two-pass KB-Whisper batch mode.
     """
     language, probability = detect_language(model, video_path)
     logger.info("Detected language: %s (probability=%.2f)", language, probability)
 
-    if language == "sv" and probability >= swedish_threshold:
+    # Per-path threshold takes precedence over the global one
+    threshold = (
+        path_config.min_confidence
+        if path_config is not None and path_config.min_confidence is not None
+        else swedish_threshold
+    )
+
+    # Apply default_language fallback when confidence is too low
+    effective_language = language
+    if path_config is not None and path_config.default_language is not None:
+        if probability < threshold:
+            effective_language = path_config.default_language
+            logger.info(
+                "Low confidence (%.2f < %.2f) for %s — using default_language=%s",
+                probability, threshold, video_path.name, effective_language,
+            )
+
+    if effective_language == "sv" and probability >= threshold:
         task = "transcribe"
         suffix = ".sv.srt"
     else:
@@ -354,7 +444,7 @@ def detect_file_language(
         suffix = ".en.srt"
 
     return {
-        "language": language,
+        "language": effective_language,
         "probability": probability,
         "task": task,
         "suffix": suffix,
@@ -367,24 +457,40 @@ def transcribe_file(
     language: str,
     task: str,
     thermal: Optional[ThermalMonitor] = None,
+    vad_filter: bool = False,
+    min_silence_duration: float = 0.5,
 ) -> list:
     """Transcribe or translate the entire video file.
 
     Iterates the faster-whisper segment generator one segment at a time so
     that *thermal* abort requests are honoured between segments.
 
+    Phase 6 additions:
+    - *vad_filter*: enable Voice Activity Detection to skip silence and reduce
+      hallucinations — recommended for home videos with background noise.
+    - *min_silence_duration*: minimum silence length in seconds used by VAD to
+      split audio segments (passed to faster-whisper as milliseconds).
+
     Returns a list of segment objects from faster-whisper.
     Raises ThermalAbortError if thermal monitoring requests an abort.
     """
     logger.info(
-        "Running task=%s language=%s on %s", task, language, video_path.name
+        "Running task=%s language=%s vad=%s on %s",
+        task, language, vad_filter, video_path.name,
     )
-    segments_gen, _info = model.transcribe(
-        str(video_path),
-        task=task,
-        language=language if task == "transcribe" else None,
-        beam_size=5,
-    )
+
+    transcribe_kwargs: dict = {
+        "task": task,
+        "language": language if task == "transcribe" else None,
+        "beam_size": 5,
+        "vad_filter": vad_filter,
+    }
+    if vad_filter:
+        transcribe_kwargs["vad_parameters"] = {
+            "min_silence_duration_ms": int(min_silence_duration * 1000),
+        }
+
+    segments_gen, _info = model.transcribe(str(video_path), **transcribe_kwargs)
     segments: list = []
     for segment in segments_gen:
         segments.append(segment)
@@ -436,6 +542,8 @@ def _transcribe_and_write(
     suffix: str,
     force: bool,
     thermal: Optional[ThermalMonitor] = None,
+    vad_filter: bool = False,
+    min_silence_duration: float = 0.5,
 ) -> dict:
     """Transcribe/translate *video_path* and write the SRT file.
 
@@ -453,7 +561,12 @@ def _transcribe_and_write(
         )
         return {"output": str(output_path), "skipped": True}
 
-    segments = transcribe_file(video_path, model, language, task, thermal=thermal)
+    segments = transcribe_file(
+        video_path, model, language, task,
+        thermal=thermal,
+        vad_filter=vad_filter,
+        min_silence_duration=min_silence_duration,
+    )
 
     if not segments:
         logger.warning("No segments produced for %s", video_path.name)
@@ -472,21 +585,35 @@ def _process_one(
     force: bool,
     thermal: Optional[ThermalMonitor] = None,
     swedish_threshold: float = 0.0,
+    path_config: Optional[PathConfig] = None,
+    vad_filter: bool = False,
+    min_silence_duration: float = 0.5,
 ) -> dict:
     """Detect language and process a single video with a pre-loaded model.
 
     Used by single-model mode (single-file command and non-KB-Whisper scan).
+    Per-path VAD and confidence settings from *path_config* override the
+    global *vad_filter* / *swedish_threshold* values when provided.
     Returns a result dict with keys: language, task, output, skipped.
     Raises on errors so callers can decide how to handle them.
     """
-    det = detect_file_language(model, video_path, swedish_threshold)
+    # Per-path config overrides CLI / global settings
+    effective_vad = path_config.vad_filter if path_config is not None else vad_filter
+    effective_silence = (
+        path_config.min_silence_duration if path_config is not None else min_silence_duration
+    )
+
+    det = detect_file_language(
+        model, video_path, swedish_threshold, path_config=path_config
+    )
 
     output_path = video_path.parent / f"{video_path.stem}{det['suffix']}"
 
     if dry_run:
         print(
             f"[dry-run] {video_path.name}: language={det['language']} "
-            f"({det['probability']:.2f}) → task={det['task']} → {output_path.name}"
+            f"({det['probability']:.2f}) → task={det['task']} "
+            f"vad={effective_vad} → {output_path.name}"
         )
         return {
             "language": det["language"],
@@ -499,6 +626,7 @@ def _process_one(
         video_path, model,
         det["language"], det["task"], det["suffix"],
         force=force, thermal=thermal,
+        vad_filter=effective_vad, min_silence_duration=effective_silence,
     )
     return {"language": det["language"], "task": det["task"], **result}
 
@@ -515,11 +643,13 @@ def _process_batch(
     limit: int,
     n_processed: int,
     n_errors: int,
+    video_path_configs: Optional[dict] = None,
 ) -> tuple[int, int]:
     """Process a pre-detected batch of files with a given model.
 
     Used by KB-Whisper two-pass mode where language detection has already run.
-    Returns updated (n_processed, n_errors).
+    *video_path_configs* maps each Path to its PathConfig for per-path VAD
+    settings (Phase 6).  Returns updated (n_processed, n_errors).
     """
     for video in batch:
         if _shutdown_requested:
@@ -533,9 +663,15 @@ def _process_batch(
             thermal.wait_until_cool()
 
         det = detections[video]
+        path_cfg: Optional[PathConfig] = (
+            video_path_configs.get(video) if video_path_configs else None
+        )
+        vad = path_cfg.vad_filter if path_cfg is not None else False
+        silence = path_cfg.min_silence_duration if path_cfg is not None else 0.5
+
         logger.info(
-            "Processing: %s (language=%s task=%s model=%s)",
-            video.name, det["language"], det["task"], model_name,
+            "Processing: %s (language=%s task=%s model=%s vad=%s)",
+            video.name, det["language"], det["task"], model_name, vad,
         )
         t0 = time.monotonic()
 
@@ -544,6 +680,7 @@ def _process_batch(
                 video, model,
                 det["language"], det["task"], det["suffix"],
                 force=force, thermal=thermal,
+                vad_filter=vad, min_silence_duration=silence,
             )
             elapsed = time.monotonic() - t0
 
@@ -673,11 +810,18 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     swedish_model_name: Optional[str] = args.swedish_model
     use_kb = bool(swedish_model_name and swedish_model_name != default_model_name)
 
+    vad = args.vad_filter
+    silence = args.min_silence_duration
+
     try:
         if not use_kb:
             # Original single-model path
             model = load_model(default_model_name, args.device, args.compute_type)
-            _process_one(video_path, model, dry_run=args.dry_run, force=args.force)
+            _process_one(
+                video_path, model,
+                dry_run=args.dry_run, force=args.force,
+                vad_filter=vad, min_silence_duration=silence,
+            )
         else:
             # Two-model path: detect with default, transcribe with appropriate model
             det_model = load_model(default_model_name, args.device, args.compute_type)
@@ -689,7 +833,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 print(
                     f"[dry-run] {video_path.name}: language={det['language']} "
                     f"({det['probability']:.2f}) → task={det['task']} "
-                    f"→ model={model_used} → {output_path.name}"
+                    f"vad={vad} → model={model_used} → {output_path.name}"
                 )
                 return 0
 
@@ -701,6 +845,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     video_path, sv_model,
                     det["language"], det["task"], det["suffix"],
                     force=args.force,
+                    vad_filter=vad, min_silence_duration=silence,
                 )
             else:
                 # Non-Swedish: reuse the already-loaded default model
@@ -708,6 +853,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     video_path, det_model,
                     det["language"], det["task"], det["suffix"],
                     force=args.force,
+                    vad_filter=vad, min_silence_duration=silence,
                 )
     except Exception as exc:
         logger.error("Failed to process %s: %s", video_path.name, exc)
@@ -753,6 +899,9 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
     limit: int = args.limit if args.limit != 0 else cfg.get("max_files_per_run", 0)
     force: bool = args.force
     swedish_threshold: float = float(cfg.get("swedish_threshold", 0.0))
+    # CLI-level VAD settings (per-path config overrides these)
+    cli_vad_filter: bool = getattr(args, "vad_filter", False)
+    cli_min_silence: float = getattr(args, "min_silence_duration", 0.5)
 
     if use_kb_whisper:
         logger.info(
@@ -769,12 +918,21 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
         video_exts = VIDEO_EXTENSIONS
 
     # ------------------------------------------------------------------
-    # 3. Resolve scan directories: CLI arg > config scan_paths > error
+    # 3. Resolve scan paths with per-path config (Phase 6)
+    #    CLI arg > config scan_paths (supports both string and dict entries)
     # ------------------------------------------------------------------
     if args.directory:
-        scan_dirs: list[Path] = [args.directory]
+        # CLI directory: wrap in a PathConfig using CLI VAD settings
+        cli_path_cfg = PathConfig(
+            path=args.directory,
+            vad_filter=cli_vad_filter,
+            min_silence_duration=cli_min_silence,
+        )
+        scan_path_entries: list[tuple[Path, PathConfig]] = [
+            (args.directory, cli_path_cfg)
+        ]
     elif "scan_paths" in cfg:
-        scan_dirs = [Path(p) for p in cfg["scan_paths"]]
+        scan_path_entries = parse_scan_paths(cfg["scan_paths"])
     else:
         logger.error(
             "No directory specified. Provide a directory argument or "
@@ -789,17 +947,23 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
     state = load_state(state_file)
 
     # ------------------------------------------------------------------
-    # 5. Build queue across all scan directories
+    # 5. Build queue across all scan directories, tracking per-path config
     # ------------------------------------------------------------------
     all_videos: list[Path] = []
-    for d in scan_dirs:
+    video_path_configs: dict[Path, PathConfig] = {}
+    for d, path_cfg in scan_path_entries:
         if not d.is_dir():
             logger.warning("Scan path not found or not a directory: %s", d)
             continue
-        logger.info("Scanning %s for video files...", d)
+        logger.info(
+            "Scanning %s (vad=%s min_confidence=%s default_language=%s)...",
+            d, path_cfg.vad_filter, path_cfg.min_confidence, path_cfg.default_language,
+        )
         found = find_videos(d, extensions=video_exts)
         logger.info("  %d video file(s) found in %s", len(found), d)
         all_videos.extend(found)
+        for v in found:
+            video_path_configs[v] = path_cfg
 
     logger.info("Total: %d video file(s) found.", len(all_videos))
     queue = build_queue(all_videos, state, force)
@@ -864,6 +1028,7 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                         dry_run=False, force=force,
                         thermal=thermal,
                         swedish_threshold=swedish_threshold,
+                        path_config=video_path_configs.get(video),
                     )
                     elapsed = time.monotonic() - t0
 
@@ -921,7 +1086,10 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                     break
                 logger.info("[detect %d/%d] %s", i, len(queue), video.name)
                 try:
-                    det = detect_file_language(det_model, video, swedish_threshold)
+                    det = detect_file_language(
+                        det_model, video, swedish_threshold,
+                        path_config=video_path_configs.get(video),
+                    )
                     detections[video] = det
                 except Exception as exc:
                     logger.error("Detection failed for %s: %s", video.name, exc)
@@ -954,6 +1122,7 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                     swedish_queue, sv_model, swedish_model_name,
                     detections, state, state_file,
                     thermal, force, limit, n_processed, n_errors,
+                    video_path_configs=video_path_configs,
                 )
                 del sv_model
 
@@ -969,6 +1138,7 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                     other_queue, def_model, default_model_name,
                     detections, state, state_file,
                     thermal, force, limit, n_processed, n_errors,
+                    video_path_configs=video_path_configs,
                 )
                 del def_model
 
@@ -1034,6 +1204,23 @@ def _add_model_args(parser: argparse.ArgumentParser, defaults: bool = True) -> N
         "--force",
         action="store_true",
         help="Overwrite existing .srt files / ignore state.",
+    )
+    parser.add_argument(
+        "--vad-filter",
+        action="store_true",
+        dest="vad_filter",
+        help=(
+            "Enable Voice Activity Detection to skip silence and reduce "
+            "hallucinations. Recommended for home videos with background noise."
+        ),
+    )
+    parser.add_argument(
+        "--min-silence-duration",
+        type=float,
+        default=0.5,
+        dest="min_silence_duration",
+        metavar="SECONDS",
+        help="Minimum silence duration in seconds used by VAD (default: 0.5).",
     )
 
 
