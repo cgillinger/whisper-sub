@@ -21,11 +21,25 @@ fi
 mkdir -p "${HF_HOME:-/root/.cache/huggingface}"
 chown -R whisper:whisper "${HF_HOME:-/root/.cache/huggingface}"
 
-# Drop privileges and run the scan.
+# Drop privileges and run whisper_sub.py.
 # gosu handles the exec so the Python process is PID 1's direct child and
 # receives signals (SIGTERM from docker stop) correctly.
-# "$@" passes any extra arguments (e.g. --limit 5) to the scan subcommand.
-exec gosu whisper python /app/whisper_sub.py scan \
-    --config /app/config.yml \
-    --state-file /app/state.json \
-    "$@"
+#
+# Dispatch logic:
+#   No args / extra flags only  →  default "scan" with config + state file
+#     docker compose run --rm emby-whisper
+#     docker compose run --rm emby-whisper --limit 5
+#   First arg is a subcommand   →  pass everything through as-is
+#     docker compose run --rm emby-whisper transcribe /media/film.mkv
+#     docker compose run --rm emby-whisper scan /media/Movies --dry-run
+case "${1:-}" in
+    scan|transcribe)
+        exec gosu whisper python /app/whisper_sub.py "$@"
+        ;;
+    *)
+        exec gosu whisper python /app/whisper_sub.py scan \
+            --config /app/config.yml \
+            --state-file /app/state.json \
+            "$@"
+        ;;
+esac
