@@ -3,6 +3,7 @@
 
 Usage:
   Single file:   python whisper_sub.py <video_path> [options]
+  Transcribe:    python whisper_sub.py transcribe <video_path> [options]
   Batch scan:    python whisper_sub.py scan <directory> [options]
   Config-driven: python whisper_sub.py scan --config /app/config.yml
 
@@ -717,36 +718,53 @@ def build_queue(videos: list[Path], state: dict, force: bool) -> list[Path]:
 
 
 def cmd_transcribe(args: argparse.Namespace) -> int:
-    """Handle single-file transcription mode.
+    """Handle single-file transcription (``transcribe`` subcommand or legacy positional mode).
 
-    When --swedish-model is provided and the file is Swedish, swaps to the
-    KB-Whisper model for transcription (one model in memory at a time).
+    When ``--config`` is provided, model/device/compute-type/threshold/VAD
+    defaults are read from the config file; CLI arguments take precedence.
+    When ``--swedish-model`` (via CLI or config) differs from the default
+    model, KB-Whisper two-model logic is used.
     """
     video_path: Path = args.path
     if not video_path.exists():
         logger.error("File not found: %s", video_path)
         return 1
 
-    default_model_name: str = args.model
-    swedish_model_name: Optional[str] = args.swedish_model
+    # Load optional config (only present for the ``transcribe`` subcommand;
+    # absent in legacy positional mode — use getattr to avoid AttributeError).
+    cfg: dict = {}
+    config_path = getattr(args, "config", None)
+    if config_path:
+        cfg = load_config(Path(config_path))
+
+    # Resolve settings: CLI > config > hard-coded defaults.
+    default_model_name: str = (
+        args.model
+        or cfg.get("default_model")
+        or cfg.get("model", "large-v3")
+    )
+    swedish_model_name: Optional[str] = args.swedish_model or cfg.get("swedish_model")
+    device: str = args.device or cfg.get("device", "cpu")
+    compute_type: str = args.compute_type or cfg.get("compute_type", "int8")
+    swedish_threshold: float = float(cfg.get("swedish_threshold", 0.0))
     use_kb = bool(swedish_model_name and swedish_model_name != default_model_name)
 
-    vad = args.vad_filter
-    silence = args.min_silence_duration
+    vad: bool = args.vad_filter
+    silence: float = args.min_silence_duration
 
     try:
         if not use_kb:
-            # Original single-model path
-            model = load_model(default_model_name, args.device, args.compute_type)
+            model = load_model(default_model_name, device, compute_type)
             _process_one(
                 video_path, model,
                 dry_run=args.dry_run, force=args.force,
+                swedish_threshold=swedish_threshold,
                 vad_filter=vad, min_silence_duration=silence,
             )
         else:
-            # Two-model path: detect with default, transcribe with appropriate model
-            det_model = load_model(default_model_name, args.device, args.compute_type)
-            det = detect_file_language(det_model, video_path)
+            # KB-Whisper: detect with default model, swap to appropriate model for transcription.
+            det_model = load_model(default_model_name, device, compute_type)
+            det = detect_file_language(det_model, video_path, swedish_threshold)
 
             if args.dry_run:
                 output_path = video_path.parent / f"{video_path.stem}{det['suffix']}"
@@ -759,9 +777,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 return 0
 
             if det["task"] == "transcribe":
-                # Swedish: swap models
+                # Swedish: swap to KB-Whisper model.
                 del det_model
-                sv_model = load_model(swedish_model_name, args.device, args.compute_type)
+                sv_model = load_model(swedish_model_name, device, compute_type)
                 _transcribe_and_write(
                     video_path, sv_model,
                     det["language"], det["task"], det["suffix"],
@@ -769,7 +787,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     vad_filter=vad, min_silence_duration=silence,
                 )
             else:
-                # Non-Swedish: reuse the already-loaded default model
+                # Non-Swedish: reuse the already-loaded default model.
                 _transcribe_and_write(
                     video_path, det_model,
                     det["language"], det["task"], det["suffix"],
@@ -1236,6 +1254,36 @@ def build_parser() -> argparse.ArgumentParser:
     _add_model_args(scan_p, defaults=False)
 
     # ------------------------------------------------------------------
+    # transcribe subcommand — single file, optional config
+    # ------------------------------------------------------------------
+    transcribe_p = subparsers.add_parser(
+        "transcribe",
+        help="Detect language and transcribe (or translate) a single video file.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    transcribe_p.add_argument(
+        "path",
+        type=Path,
+        help="Path to the video file.",
+    )
+    transcribe_p.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Optional config.yml to load model/device/threshold/VAD defaults from. "
+            "CLI arguments override config values."
+        ),
+    )
+    transcribe_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Detect language and print planned action; do not write any file.",
+    )
+    _add_model_args(transcribe_p, defaults=False)
+
+    # ------------------------------------------------------------------
     # Single-file mode (no subcommand) — args on the main parser
     # ------------------------------------------------------------------
     parser.add_argument(
@@ -1266,10 +1314,11 @@ def main() -> None:
     # even when subparsers are optional.  Pre-detect: if the first non-option
     # argument is not a known subcommand, parse with a dedicated single-file
     # parser that has no subparsers.
+    _known_subcommands = {"scan", "transcribe"}
     argv = sys.argv[1:]
     first_positional = next((a for a in argv if not a.startswith("-")), None)
 
-    if first_positional is not None and first_positional != "scan":
+    if first_positional is not None and first_positional not in _known_subcommands:
         sf_parser = argparse.ArgumentParser(
             description="Generate SRT subtitles from a single video file."
         )
@@ -1289,6 +1338,8 @@ def main() -> None:
 
     if args.command == "scan":
         sys.exit(cmd_scan(args))
+    elif args.command == "transcribe":
+        sys.exit(cmd_transcribe(args))
     else:
         if args.path is None:
             parser.print_help()
