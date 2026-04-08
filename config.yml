@@ -7,7 +7,19 @@ scan_paths:
   - /media/EgenFilm1
 
 # Whisper settings
-model: large-v3
+#
+# KB-Whisper (Phase 4): set swedish_model to use a specialised model for
+# Swedish transcription. When swedish_model differs from default_model the
+# scan command uses a memory-efficient two-pass strategy:
+#   Pass 1 — detect language for all files      (default_model)
+#   Pass 2a — transcribe Swedish files           (swedish_model / KB-Whisper)
+#   Pass 2b — translate non-Swedish files        (default_model, reloaded)
+# Only one large model is in memory at a time (~3–4 GB each).
+#
+# To disable KB-Whisper, remove swedish_model or set it equal to default_model.
+default_model: large-v3
+swedish_model: KBLab/whisper-large-v3-swedish
+
 device: cpu
 compute_type: int8
 

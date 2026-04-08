@@ -2,13 +2,20 @@
 """whisper_sub.py — Generate .srt subtitle files from video using faster-whisper.
 
 Usage:
-  Single file:  python whisper_sub.py <video_path> [options]
-  Batch scan:   python whisper_sub.py scan <directory> [options]
+  Single file:   python whisper_sub.py <video_path> [options]
+  Batch scan:    python whisper_sub.py scan <directory> [options]
   Config-driven: python whisper_sub.py scan --config /app/config.yml
 
 Language logic:
   - Swedish (above confidence threshold) → transcribe → <filename>.sv.srt
   - Everything else → translate to English → <filename>.en.srt
+
+KB-Whisper (Phase 4):
+  When swedish_model differs from default_model the scan command uses a
+  two-pass strategy to keep only one large model in memory at a time:
+    Pass 1 — detect language for all queued files (default_model)
+    Pass 2a — transcribe Swedish files          (swedish_model)
+    Pass 2b — translate non-Swedish files       (default_model)
 """
 
 import argparse
@@ -326,6 +333,34 @@ def detect_language(model, video_path: Path) -> tuple[str, float]:
     return info.language, info.language_probability
 
 
+def detect_file_language(
+    model,
+    video_path: Path,
+    swedish_threshold: float = 0.0,
+) -> dict:
+    """Detect language for a single file and determine the appropriate task.
+
+    Returns a dict with keys: language, probability, task, suffix.
+    Extracted from _process_one to support the two-pass KB-Whisper batch mode.
+    """
+    language, probability = detect_language(model, video_path)
+    logger.info("Detected language: %s (probability=%.2f)", language, probability)
+
+    if language == "sv" and probability >= swedish_threshold:
+        task = "transcribe"
+        suffix = ".sv.srt"
+    else:
+        task = "translate"
+        suffix = ".en.srt"
+
+    return {
+        "language": language,
+        "probability": probability,
+        "task": task,
+        "suffix": suffix,
+    }
+
+
 def transcribe_file(
     video_path: Path,
     model,
@@ -376,41 +411,22 @@ def load_model(model_name: str, device: str, compute_type: str):
 # ---------------------------------------------------------------------------
 
 
-def _process_one(
+def _transcribe_and_write(
     video_path: Path,
     model,
-    dry_run: bool,
+    language: str,
+    task: str,
+    suffix: str,
     force: bool,
     thermal: Optional[ThermalMonitor] = None,
-    swedish_threshold: float = 0.0,
 ) -> dict:
-    """Process a single video with a pre-loaded model.
+    """Transcribe/translate *video_path* and write the SRT file.
 
-    Returns a result dict with keys: language, task, output, skipped.
-    Raises on transcription / IO errors (including ThermalAbortError) so
-    callers can decide how to handle them.
+    Assumes language detection has already been performed by the caller.
+    Returns a dict with keys: output, skipped.
+    Raises on errors (including ThermalAbortError).
     """
-    language, probability = detect_language(model, video_path)
-    logger.info(
-        "Detected language: %s (probability=%.2f)", language, probability
-    )
-
-    if language == "sv" and probability >= swedish_threshold:
-        task = "transcribe"
-        suffix = ".sv.srt"
-    else:
-        task = "translate"
-        suffix = ".en.srt"
-
-    stem = video_path.stem
-    output_path = video_path.parent / f"{stem}{suffix}"
-
-    if dry_run:
-        print(
-            f"[dry-run] {video_path.name}: language={language} "
-            f"({probability:.2f}) → task={task} → {output_path.name}"
-        )
-        return {"language": language, "task": task, "output": str(output_path), "skipped": False}
+    output_path = video_path.parent / f"{video_path.stem}{suffix}"
 
     if output_path.exists() and not force:
         logger.info(
@@ -418,7 +434,7 @@ def _process_one(
             video_path.name,
             output_path.name,
         )
-        return {"language": language, "task": task, "output": str(output_path), "skipped": True}
+        return {"output": str(output_path), "skipped": True}
 
     segments = transcribe_file(video_path, model, language, task, thermal=thermal)
 
@@ -429,7 +445,128 @@ def _process_one(
     output_path.write_text(srt_content, encoding="utf-8")
     logger.info("Wrote %d segments to %s", len(segments), output_path)
 
-    return {"language": language, "task": task, "output": str(output_path), "skipped": False}
+    return {"output": str(output_path), "skipped": False}
+
+
+def _process_one(
+    video_path: Path,
+    model,
+    dry_run: bool,
+    force: bool,
+    thermal: Optional[ThermalMonitor] = None,
+    swedish_threshold: float = 0.0,
+) -> dict:
+    """Detect language and process a single video with a pre-loaded model.
+
+    Used by single-model mode (single-file command and non-KB-Whisper scan).
+    Returns a result dict with keys: language, task, output, skipped.
+    Raises on errors so callers can decide how to handle them.
+    """
+    det = detect_file_language(model, video_path, swedish_threshold)
+
+    output_path = video_path.parent / f"{video_path.stem}{det['suffix']}"
+
+    if dry_run:
+        print(
+            f"[dry-run] {video_path.name}: language={det['language']} "
+            f"({det['probability']:.2f}) → task={det['task']} → {output_path.name}"
+        )
+        return {
+            "language": det["language"],
+            "task": det["task"],
+            "output": str(output_path),
+            "skipped": False,
+        }
+
+    result = _transcribe_and_write(
+        video_path, model,
+        det["language"], det["task"], det["suffix"],
+        force=force, thermal=thermal,
+    )
+    return {"language": det["language"], "task": det["task"], **result}
+
+
+def _process_batch(
+    batch: list[Path],
+    model,
+    model_name: str,
+    detections: dict,
+    state: dict,
+    state_file: Path,
+    thermal: Optional[ThermalMonitor],
+    force: bool,
+    limit: int,
+    n_processed: int,
+    n_errors: int,
+) -> tuple[int, int]:
+    """Process a pre-detected batch of files with a given model.
+
+    Used by KB-Whisper two-pass mode where language detection has already run.
+    Returns updated (n_processed, n_errors).
+    """
+    for video in batch:
+        if _shutdown_requested:
+            break
+        if limit > 0 and n_processed >= limit:
+            logger.info("Limit of %d file(s) reached.", limit)
+            break
+
+        if thermal is not None:
+            thermal.reset_for_next_file()
+            thermal.wait_until_cool()
+
+        det = detections[video]
+        logger.info(
+            "Processing: %s (language=%s task=%s model=%s)",
+            video.name, det["language"], det["task"], model_name,
+        )
+        t0 = time.monotonic()
+
+        try:
+            result = _transcribe_and_write(
+                video, model,
+                det["language"], det["task"], det["suffix"],
+                force=force, thermal=thermal,
+            )
+            elapsed = time.monotonic() - t0
+
+            if not result["skipped"]:
+                state["processed"][str(video)] = {
+                    "language": det["language"],
+                    "task": det["task"],
+                    "output": result["output"],
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "duration_seconds": round(elapsed, 2),
+                    "model": model_name,
+                }
+                n_processed += 1
+                logger.info(
+                    "Done: %s → %s in %.1fs",
+                    video.name, Path(result["output"]).name, elapsed,
+                )
+
+        except ThermalAbortError as exc:
+            elapsed = time.monotonic() - t0
+            logger.error("Thermal abort for %s after %.1fs: %s", video.name, elapsed, exc)
+            state.setdefault("errors", {})[str(video)] = {
+                "error": str(exc),
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            }
+            n_errors += 1
+
+        except Exception as exc:
+            elapsed = time.monotonic() - t0
+            logger.error("Error processing %s (%.1fs): %s", video.name, elapsed, exc)
+            state.setdefault("errors", {})[str(video)] = {
+                "error": str(exc),
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            }
+            n_errors += 1
+
+        finally:
+            save_state(state, state_file)
+
+    return n_processed, n_errors
 
 
 # ---------------------------------------------------------------------------
@@ -505,23 +642,71 @@ def build_queue(videos: list[Path], state: dict, force: bool) -> list[Path]:
 
 
 def cmd_transcribe(args: argparse.Namespace) -> int:
-    """Handle single-file transcription mode."""
+    """Handle single-file transcription mode.
+
+    When --swedish-model is provided and the file is Swedish, swaps to the
+    KB-Whisper model for transcription (one model in memory at a time).
+    """
     video_path: Path = args.path
     if not video_path.exists():
         logger.error("File not found: %s", video_path)
         return 1
 
-    model = load_model(args.model, args.device, args.compute_type)
+    default_model_name: str = args.model
+    swedish_model_name: Optional[str] = args.swedish_model
+    use_kb = bool(swedish_model_name and swedish_model_name != default_model_name)
+
     try:
-        _process_one(video_path, model, dry_run=args.dry_run, force=args.force)
+        if not use_kb:
+            # Original single-model path
+            model = load_model(default_model_name, args.device, args.compute_type)
+            _process_one(video_path, model, dry_run=args.dry_run, force=args.force)
+        else:
+            # Two-model path: detect with default, transcribe with appropriate model
+            det_model = load_model(default_model_name, args.device, args.compute_type)
+            det = detect_file_language(det_model, video_path)
+
+            if args.dry_run:
+                output_path = video_path.parent / f"{video_path.stem}{det['suffix']}"
+                model_used = swedish_model_name if det["task"] == "transcribe" else default_model_name
+                print(
+                    f"[dry-run] {video_path.name}: language={det['language']} "
+                    f"({det['probability']:.2f}) → task={det['task']} "
+                    f"→ model={model_used} → {output_path.name}"
+                )
+                return 0
+
+            if det["task"] == "transcribe":
+                # Swedish: swap models
+                del det_model
+                sv_model = load_model(swedish_model_name, args.device, args.compute_type)
+                _transcribe_and_write(
+                    video_path, sv_model,
+                    det["language"], det["task"], det["suffix"],
+                    force=args.force,
+                )
+            else:
+                # Non-Swedish: reuse the already-loaded default model
+                _transcribe_and_write(
+                    video_path, det_model,
+                    det["language"], det["task"], det["suffix"],
+                    force=args.force,
+                )
     except Exception as exc:
         logger.error("Failed to process %s: %s", video_path.name, exc)
         return 1
     return 0
 
 
-def cmd_scan(args: argparse.Namespace) -> int:
-    """Handle batch scan mode: find all videos and process them sequentially."""
+def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
+    """Handle batch scan mode: find all videos and process them sequentially.
+
+    When swedish_model differs from default_model (KB-Whisper mode) the
+    command runs a two-pass strategy to keep only one model in memory:
+      Pass 1 — detect language for every queued file (default_model)
+      Pass 2a — transcribe Swedish files             (swedish_model)
+      Pass 2b — translate non-Swedish files          (default_model, reloaded)
+    """
     # ------------------------------------------------------------------
     # 1. Load config file (if provided)
     # ------------------------------------------------------------------
@@ -532,12 +717,31 @@ def cmd_scan(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------
     # 2. Resolve settings: CLI args take precedence over config, then defaults
     # ------------------------------------------------------------------
-    model_name: str = args.model or cfg.get("model", "large-v3")
+    # default_model: used for language detection and non-Swedish transcription
+    default_model_name: str = (
+        args.model
+        or cfg.get("default_model")
+        or cfg.get("model", "large-v3")
+    )
+    # swedish_model: used for Swedish transcription (KB-Whisper)
+    swedish_model_name: Optional[str] = (
+        args.swedish_model or cfg.get("swedish_model")
+    )
+    use_kb_whisper = bool(
+        swedish_model_name and swedish_model_name != default_model_name
+    )
+
     device: str = args.device or cfg.get("device", "cpu")
     compute_type: str = args.compute_type or cfg.get("compute_type", "int8")
     limit: int = args.limit if args.limit != 0 else cfg.get("max_files_per_run", 0)
     force: bool = args.force
     swedish_threshold: float = float(cfg.get("swedish_threshold", 0.0))
+
+    if use_kb_whisper:
+        logger.info(
+            "KB-Whisper mode: default_model=%s swedish_model=%s",
+            default_model_name, swedish_model_name,
+        )
 
     # Video extensions (from config or global default)
     if "video_extensions" in cfg:
@@ -609,91 +813,147 @@ def cmd_scan(args: argparse.Namespace) -> int:
             thermal_cfg["resume_temp"],
         )
 
-    # ------------------------------------------------------------------
-    # 7. Load model
-    # ------------------------------------------------------------------
-    model = load_model(model_name, device, compute_type)
-
-    # ------------------------------------------------------------------
-    # 8. Process queue
-    # ------------------------------------------------------------------
     n_processed = 0
     n_errors = 0
 
     try:
-        for i, video in enumerate(queue, start=1):
-            if _shutdown_requested:
-                logger.info(
-                    "Shutdown requested — stopping after %d/%d file(s). State saved.",
-                    i - 1,
-                    len(queue),
-                )
-                break
+        if not use_kb_whisper:
+            # ----------------------------------------------------------
+            # Single-model path (original behaviour)
+            # ----------------------------------------------------------
+            model = load_model(default_model_name, device, compute_type)
 
-            if limit > 0 and n_processed >= limit:
-                logger.info("Limit of %d file(s) reached.", limit)
-                break
-
-            # Thermal check before each file (spec point 1)
-            if thermal is not None:
-                thermal.reset_for_next_file()
-                thermal.wait_until_cool()
-
-            logger.info("[%d/%d] %s", i, len(queue), video)
-            t0 = time.monotonic()
-
-            try:
-                result = _process_one(
-                    video,
-                    model,
-                    dry_run=False,
-                    force=force,
-                    thermal=thermal,
-                    swedish_threshold=swedish_threshold,
-                )
-                elapsed = time.monotonic() - t0
-
-                if not result["skipped"]:
-                    state["processed"][str(video)] = {
-                        "language": result["language"],
-                        "task": result["task"],
-                        "output": result["output"],
-                        "timestamp": datetime.now().isoformat(timespec="seconds"),
-                        "duration_seconds": round(elapsed, 2),
-                        "model": model_name,
-                    }
-                    n_processed += 1
+            for i, video in enumerate(queue, start=1):
+                if _shutdown_requested:
                     logger.info(
-                        "Done: %s → %s in %.1fs",
-                        video.name,
-                        Path(result["output"]).name,
-                        elapsed,
+                        "Shutdown requested — stopping after %d/%d file(s).",
+                        i - 1, len(queue),
                     )
+                    break
+                if limit > 0 and n_processed >= limit:
+                    logger.info("Limit of %d file(s) reached.", limit)
+                    break
 
-            except ThermalAbortError as exc:
-                elapsed = time.monotonic() - t0
-                logger.error(
-                    "Thermal abort for %s after %.1fs: %s", video.name, elapsed, exc
+                if thermal is not None:
+                    thermal.reset_for_next_file()
+                    thermal.wait_until_cool()
+
+                logger.info("[%d/%d] %s", i, len(queue), video)
+                t0 = time.monotonic()
+
+                try:
+                    result = _process_one(
+                        video, model,
+                        dry_run=False, force=force,
+                        thermal=thermal,
+                        swedish_threshold=swedish_threshold,
+                    )
+                    elapsed = time.monotonic() - t0
+
+                    if not result["skipped"]:
+                        state["processed"][str(video)] = {
+                            "language": result["language"],
+                            "task": result["task"],
+                            "output": result["output"],
+                            "timestamp": datetime.now().isoformat(timespec="seconds"),
+                            "duration_seconds": round(elapsed, 2),
+                            "model": default_model_name,
+                        }
+                        n_processed += 1
+                        logger.info(
+                            "Done: %s → %s in %.1fs",
+                            video.name, Path(result["output"]).name, elapsed,
+                        )
+
+                except ThermalAbortError as exc:
+                    elapsed = time.monotonic() - t0
+                    logger.error("Thermal abort for %s after %.1fs: %s", video.name, elapsed, exc)
+                    state.setdefault("errors", {})[str(video)] = {
+                        "error": str(exc),
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    n_errors += 1
+
+                except Exception as exc:
+                    elapsed = time.monotonic() - t0
+                    logger.error("Error processing %s (%.1fs): %s", video.name, elapsed, exc)
+                    state.setdefault("errors", {})[str(video)] = {
+                        "error": str(exc),
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    n_errors += 1
+
+                finally:
+                    save_state(state, state_file)
+
+        else:
+            # ----------------------------------------------------------
+            # KB-Whisper two-pass path
+            # ----------------------------------------------------------
+
+            # Pass 1: language detection using the default model
+            logger.info(
+                "Pass 1/3 — detecting language for %d file(s) using %s",
+                len(queue), default_model_name,
+            )
+            det_model = load_model(default_model_name, device, compute_type)
+            detections: dict[Path, dict] = {}
+
+            for i, video in enumerate(queue, start=1):
+                if _shutdown_requested:
+                    break
+                logger.info("[detect %d/%d] %s", i, len(queue), video.name)
+                try:
+                    det = detect_file_language(det_model, video, swedish_threshold)
+                    detections[video] = det
+                except Exception as exc:
+                    logger.error("Detection failed for %s: %s", video.name, exc)
+                    state.setdefault("errors", {})[str(video)] = {
+                        "error": f"Language detection failed: {exc}",
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    n_errors += 1
+                    save_state(state, state_file)
+
+            # Free default model memory before loading KB-Whisper
+            del det_model
+
+            swedish_queue = [v for v in queue if v in detections and detections[v]["task"] == "transcribe"]
+            other_queue   = [v for v in queue if v in detections and detections[v]["task"] == "translate"]
+
+            logger.info(
+                "Detection complete: %d Swedish, %d other, %d detection error(s)",
+                len(swedish_queue), len(other_queue), n_errors,
+            )
+
+            # Pass 2a: Swedish files with KB-Whisper model
+            if swedish_queue and not _shutdown_requested:
+                logger.info(
+                    "Pass 2/3 — transcribing %d Swedish file(s) with %s",
+                    len(swedish_queue), swedish_model_name,
                 )
-                state.setdefault("errors", {})[str(video)] = {
-                    "error": str(exc),
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                }
-                n_errors += 1
-
-            except Exception as exc:
-                elapsed = time.monotonic() - t0
-                logger.error(
-                    "Error processing %s (%.1fs): %s", video.name, elapsed, exc
+                sv_model = load_model(swedish_model_name, device, compute_type)
+                n_processed, n_errors = _process_batch(
+                    swedish_queue, sv_model, swedish_model_name,
+                    detections, state, state_file,
+                    thermal, force, limit, n_processed, n_errors,
                 )
-                state.setdefault("errors", {})[str(video)] = {
-                    "error": str(exc),
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                }
-                n_errors += 1
+                del sv_model
 
-            finally:
-                save_state(state, state_file)
+            # Pass 2b: Non-Swedish files with default model (reloaded)
+            remaining_limit = limit == 0 or n_processed < limit
+            if other_queue and not _shutdown_requested and remaining_limit:
+                logger.info(
+                    "Pass 3/3 — translating %d non-Swedish file(s) with %s",
+                    len(other_queue), default_model_name,
+                )
+                def_model = load_model(default_model_name, device, compute_type)
+                n_processed, n_errors = _process_batch(
+                    other_queue, def_model, default_model_name,
+                    detections, state, state_file,
+                    thermal, force, limit, n_processed, n_errors,
+                )
+                del def_model
 
     finally:
         if thermal is not None:
@@ -701,9 +961,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     logger.info(
         "Scan complete: %d processed, %d error(s). State: %s",
-        n_processed,
-        n_errors,
-        state_file,
+        n_processed, n_errors, state_file,
     )
     return 0 if n_errors == 0 else 1
 
@@ -727,7 +985,20 @@ def _add_model_args(parser: argparse.ArgumentParser, defaults: bool = True) -> N
         "--model",
         default=default_model,
         metavar="MODEL",
-        help="Whisper model name (e.g. large-v3, medium, small).",
+        help="Whisper model for language detection and non-Swedish transcription.",
+    )
+    parser.add_argument(
+        "--swedish-model",
+        default=None,
+        dest="swedish_model",
+        metavar="MODEL",
+        help=(
+            "Whisper model used for Swedish transcription (KB-Whisper). "
+            "When set and different from --model, enables two-pass processing: "
+            "detect all languages first, then transcribe Swedish with this model "
+            "and translate everything else with --model. "
+            "Example: KBLab/whisper-large-v3-swedish"
+        ),
     )
     parser.add_argument(
         "--device",
