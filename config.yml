@@ -36,7 +36,7 @@ scan_paths:
 #
 # To disable KB-Whisper, remove swedish_model or set it equal to default_model.
 default_model: large-v3
-swedish_model: KBLab/whisper-large-v3-swedish
+swedish_model: KBLab/kb-whisper-large
 
 # OpenVINO (Phase 5): uses the Intel iGPU (UHD 730) for 2-4x faster
 # transcription.  Requires /dev/dri/renderD128 passed through in

@@ -490,6 +490,7 @@ def transcribe_file(
         "task": task,
         "language": language if task == "transcribe" else None,
         "beam_size": 5,
+        "word_timestamps": True,
         "vad_filter": vad_filter,
         "hallucination_silence_threshold": 1.0,
         "no_speech_threshold": 0.4,
@@ -1159,7 +1160,7 @@ def _add_model_args(parser: argparse.ArgumentParser, defaults: bool = True) -> N
             "When set and different from --model, enables two-pass processing: "
             "detect all languages first, then transcribe Swedish with this model "
             "and translate everything else with --model. "
-            "Example: KBLab/whisper-large-v3-swedish"
+            "Example: KBLab/kb-whisper-large"
         ),
     )
     parser.add_argument(
@@ -1368,6 +1369,10 @@ def clamp_segment_durations(
         if ideal_end < seg.end:
             clamped.append(
                 SimpleNamespace(start=seg.start, end=ideal_end, text=seg.text)
+            )
+        elif seg.end < seg.start + 2.0:
+            clamped.append(
+                SimpleNamespace(start=seg.start, end=seg.start + 2.0, text=seg.text)
             )
         else:
             clamped.append(seg)
