@@ -17,6 +17,7 @@
 scan_paths:
   - path: /media/Emby
     min_confidence: 0.7
+    vad_filter: true
   - path: /media/EgenFilm1
     min_confidence: 0.5      # lower threshold for home videos
     vad_filter: true

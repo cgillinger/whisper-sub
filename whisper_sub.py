@@ -491,6 +491,8 @@ def transcribe_file(
         "language": language if task == "transcribe" else None,
         "beam_size": 5,
         "vad_filter": vad_filter,
+        "hallucination_silence_threshold": 1.0,
+        "no_speech_threshold": 0.4,
     }
     if vad_filter:
         transcribe_kwargs["vad_parameters"] = {
@@ -581,6 +583,7 @@ def _transcribe_and_write(
         vad_filter=vad_filter,
         min_silence_duration=min_silence_duration,
     )
+    segments = clamp_segment_durations(segments)
 
     if not segments:
         logger.warning("No segments produced for %s", video_path.name)
@@ -1341,6 +1344,34 @@ def main() -> None:
     else:
         parser.print_help()
         sys.exit(1)
+
+
+def clamp_segment_durations(
+    segments: list,
+    max_duration: float = 7.0,
+    min_chars_per_sec: float = 15.0,
+) -> list:
+    """Post-process segments to cap display duration.
+
+    For each segment the duration is clamped to the shorter of:
+      - max_duration (default 7 s)
+      - len(text) / min_chars_per_sec (so short lines vanish quickly)
+    Minimum duration is 2 s regardless of text length.
+    """
+    from types import SimpleNamespace
+
+    clamped = []
+    for seg in segments:
+        text = seg.text.strip()
+        text_dur = max(2.0, len(text) / min_chars_per_sec)
+        ideal_end = seg.start + min(max_duration, text_dur)
+        if ideal_end < seg.end:
+            clamped.append(
+                SimpleNamespace(start=seg.start, end=ideal_end, text=seg.text)
+            )
+        else:
+            clamped.append(seg)
+    return clamped
 
 
 if __name__ == "__main__":
