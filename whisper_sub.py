@@ -584,6 +584,7 @@ def _transcribe_and_write(
         vad_filter=vad_filter,
         min_silence_duration=min_silence_duration,
     )
+    segments = split_segments_on_pause(segments)
     segments = clamp_segment_durations(segments)
 
     if not segments:
@@ -1347,6 +1348,55 @@ def main() -> None:
         sys.exit(1)
 
 
+def split_segments_on_pause(
+    segments: list,
+    min_pause: float = 0.8,
+) -> list:
+    """Split segments that contain a long pause between words.
+
+    When word_timestamps are available, any gap >= *min_pause* seconds
+    between consecutive words triggers a split into two segments.
+    Segments without word-level data are passed through unchanged.
+    """
+    from types import SimpleNamespace
+    result = []
+    for seg in segments:
+        words = getattr(seg, "words", None)
+        if not words or len(words) < 2:
+            result.append(seg)
+            continue
+        # Find split points: gaps >= min_pause between consecutive words
+        split_indices = []
+        for i in range(1, len(words)):
+            gap = words[i].start - words[i - 1].end
+            if gap >= min_pause:
+                split_indices.append(i)
+        if not split_indices:
+            result.append(seg)
+            continue
+        # Build sub-segments, but only keep splits where both sides
+        # have at least 2 words (avoids orphaned single words)
+        boundaries = [0] + split_indices + [len(words)]
+        valid = [0]
+        for j in range(1, len(boundaries) - 1):
+            left_count = boundaries[j] - valid[-1]
+            right_count = boundaries[j + 1] - boundaries[j]
+            if left_count >= 2 and right_count >= 2:
+                valid.append(boundaries[j])
+        valid.append(len(words))
+        for j in range(len(valid) - 1):
+            chunk = words[valid[j]:valid[j + 1]]
+            text = "".join(w.word for w in chunk).strip()
+            if text:
+                result.append(SimpleNamespace(
+                    start=chunk[0].start,
+                    end=chunk[-1].end,
+                    text=" " + text,
+                    words=chunk,
+                ))
+    return result
+
+
 def clamp_segment_durations(
     segments: list,
     max_duration: float = 7.0,
@@ -1362,18 +1412,24 @@ def clamp_segment_durations(
     from types import SimpleNamespace
 
     clamped = []
-    for seg in segments:
+    for i, seg in enumerate(segments):
         text = seg.text.strip()
         text_dur = max(2.0, len(text) / min_chars_per_sec)
         ideal_end = seg.start + min(max_duration, text_dur)
+        # Cap at next segment start to prevent overlap
+        next_start = segments[i + 1].start if i + 1 < len(segments) else None
+        # Minimum display time: 1s per 10 chars, floor 2s
+        min_display = max(2.0, len(text) / 10.0)
         if ideal_end < seg.end:
-            clamped.append(
-                SimpleNamespace(start=seg.start, end=ideal_end, text=seg.text)
-            )
-        elif seg.end < seg.start + 2.0:
-            clamped.append(
-                SimpleNamespace(start=seg.start, end=seg.start + 2.0, text=seg.text)
-            )
+            end = ideal_end
+        elif seg.end < seg.start + min_display:
+            end = seg.start + min_display
+        else:
+            end = seg.end
+        if next_start is not None and end > next_start:
+            end = next_start
+        if end > seg.end or end < seg.end or end != seg.end:
+            clamped.append(SimpleNamespace(start=seg.start, end=end, text=seg.text))
         else:
             clamped.append(seg)
     return clamped
