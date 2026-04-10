@@ -20,6 +20,7 @@ fi
 # whisper user before we drop privileges.
 mkdir -p "${HF_HOME:-/root/.cache/huggingface}"
 chown -R whisper:whisper "${HF_HOME:-/root/.cache/huggingface}"
+chown whisper:whisper /app
 
 # Drop privileges and run whisper_sub.py.
 # gosu handles the exec so the Python process is PID 1's direct child and
@@ -31,7 +32,7 @@ chown -R whisper:whisper "${HF_HOME:-/root/.cache/huggingface}"
 if [ $# -eq 0 ]; then
     exec gosu whisper python /app/whisper_sub.py scan \
         --config /app/config.yml \
-        --state-file /app/state.json
+        --state-file /app/statedata/state.json
 else
     exec gosu whisper python /app/whisper_sub.py "$@"
 fi

@@ -144,9 +144,11 @@ def read_nvme_temp() -> Optional[float]:
         try:
             name = (hwmon / "name").read_text().strip()
             if "nvme" in name.lower():
-                temp_file = hwmon / "temp1_input"
-                if temp_file.exists():
-                    return int(temp_file.read_text().strip()) / 1000.0
+                # Prefer Sensor 1 (temp2) over Composite (temp1)
+                for sensor in ("temp2_input", "temp1_input"):
+                    temp_file = hwmon / sensor
+                    if temp_file.exists():
+                        return int(temp_file.read_text().strip()) / 1000.0
         except OSError:
             continue
     return None
