@@ -661,7 +661,10 @@ def load_state(state_file: Path) -> dict:
     """Load processing state from a JSON file, or return a fresh state dict."""
     if state_file.exists():
         try:
-            return json.loads(state_file.read_text(encoding="utf-8"))
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            data.setdefault("processed", {})
+            data.setdefault("errors", {})
+            return data
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning(
                 "Could not read state file %s: %s — starting fresh.", state_file, exc
