@@ -385,15 +385,63 @@ def parse_scan_paths(raw: list) -> list[tuple[Path, "PathConfig"]]:
 # ---------------------------------------------------------------------------
 
 
+def decode_audio_robust(video_path: Path, sampling_rate: int = 16000) -> "np.ndarray":
+    """Decode a video's audio track to a 16 kHz mono float32 numpy array.
+
+    First tries ``faster_whisper.audio.decode_audio`` (fast, in-process PyAV).
+    On PyAV decode errors — typically caused by a single corrupt audio
+    packet somewhere in the file — falls back to the ffmpeg CLI, which is
+    tolerant of corrupt packets and simply logs + skips them.
+
+    Returns a float32 numpy array of audio samples.
+    Raises RuntimeError if both paths fail.
+    """
+    import numpy as np
+    from faster_whisper.audio import decode_audio
+
+    try:
+        return decode_audio(str(video_path), sampling_rate=sampling_rate)
+    except Exception as exc:
+        logger.warning(
+            "PyAV decode failed for %s (%s) — falling back to ffmpeg CLI.",
+            video_path.name, exc,
+        )
+
+    import subprocess
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-threads", "0",
+        "-i", str(video_path),
+        "-f", "s16le",
+        "-ac", "1",
+        "-acodec", "pcm_s16le",
+        "-ar", str(sampling_rate),
+        "-",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"ffmpeg fallback failed for {video_path.name}: "
+            f"{exc.stderr.decode('utf-8', errors='replace')[:500]}"
+        ) from exc
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "ffmpeg binary not found on PATH — required for robust audio decode."
+        ) from exc
+
+    audio = np.frombuffer(proc.stdout, dtype=np.int16)
+    return audio.astype(np.float32) / 32768.0
+
+
 def detect_language(model, video_path: Path) -> tuple[str, float]:
     """Run language detection on the first ~30 seconds of the video.
 
     Returns a (language_code, probability) tuple.
     """
-    from faster_whisper.audio import decode_audio
-
     logger.info("Detecting language from first 30 seconds of %s", video_path.name)
-    audio = decode_audio(str(video_path), sampling_rate=16000)
+    audio = decode_audio_robust(video_path, sampling_rate=16000)
     clip = audio[: 16000 * 30]
 
     _, info = model.transcribe(
@@ -502,7 +550,8 @@ def transcribe_file(
             "min_silence_duration_ms": int(min_silence_duration * 1000),
         }
 
-    segments_gen, _info = model.transcribe(str(video_path), **transcribe_kwargs)
+    audio = decode_audio_robust(video_path, sampling_rate=16000)
+    segments_gen, _info = model.transcribe(audio, **transcribe_kwargs)
     segments: list = []
     for segment in segments_gen:
         segments.append(segment)
