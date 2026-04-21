@@ -173,10 +173,10 @@ Translation runs automatically in `scan` mode when enabled in `config.yml`, and 
 2. Sign in with a Google account
 3. Click **Get API key** in the left sidebar
 4. Click **Create API key** → copy the key
-5. Set the key in your shell (or add it to your Docker environment):
+5. Create a `.env` file in the project directory (next to `whisper_sub.py`):
 
-```bash
-export GEMINI_API_KEY="your-key-here"
+```
+GEMINI_API_KEY=your-key-here
 ```
 
 **No credit card required.**
@@ -210,10 +210,13 @@ translation:
   target_language: sv
 ```
 
-Set the API key once and run as normal:
+Add your API key to `.env` in the project directory, then run as normal:
+
+```
+GEMINI_API_KEY=your-key-here
+```
 
 ```bash
-export GEMINI_API_KEY="your-key-here"
 python whisper_sub.py scan --config config.yml
 ```
 
@@ -256,28 +259,28 @@ For higher quality, privacy requirements, or higher throughput, any of these pro
 
 1. Go to [https://aistudio.google.com](https://aistudio.google.com) and sign in
 2. Click **Get API key** → **Create API key** → copy the key
-3. `export GEMINI_API_KEY="your-key-here"`
+3. Add to `.env`: `GEMINI_API_KEY=your-key-here`
 4. Set `provider: gemini` in `config.yml`
 
 #### OpenAI
 
 1. Go to [https://platform.openai.com/api-keys](https://platform.openai.com/api-keys) and sign in
 2. Click **Create new secret key** → copy the key
-3. `export OPENAI_API_KEY="your-key-here"`
+3. Add to `.env`: `OPENAI_API_KEY=your-key-here`
 4. Set `provider: openai` in `config.yml`
 
 #### DeepSeek
 
 1. Go to [https://platform.deepseek.com](https://platform.deepseek.com) and create an account
 2. Navigate to **API keys** → **Create API key** → copy the key
-3. `export DEEPSEEK_API_KEY="your-key-here"`
+3. Add to `.env`: `DEEPSEEK_API_KEY=your-key-here`
 4. Set `provider: deepseek` in `config.yml`
 
 #### Anthropic
 
 1. Go to [https://console.anthropic.com](https://console.anthropic.com) and create an account
 2. Navigate to **API keys** → **Create key** → copy the key
-3. `export ANTHROPIC_API_KEY="your-key-here"`
+3. Add to `.env`: `ANTHROPIC_API_KEY=your-key-here`
 4. Set `provider: anthropic` in `config.yml`
 
 ---
