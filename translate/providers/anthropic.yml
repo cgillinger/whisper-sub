@@ -1,0 +1,7 @@
+name: "Claude Haiku 4.5"
+driver: anthropic
+model: claude-haiku-4-5-20251001
+endpoint: https://api.anthropic.com/v1/messages
+api_key_env: ANTHROPIC_API_KEY
+free_tier:
+  enabled: false

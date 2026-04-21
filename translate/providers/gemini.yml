@@ -1,0 +1,7 @@
+name: "Gemini 2.5 Flash (Paid)"
+driver: gemini
+model: gemini-2.5-flash
+endpoint: https://generativelanguage.googleapis.com/v1beta/models
+api_key_env: GEMINI_API_KEY
+free_tier:
+  enabled: false
