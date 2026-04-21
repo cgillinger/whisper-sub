@@ -906,6 +906,12 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
             default_model_name, swedish_model_name,
         )
 
+    # Translation (optional post-processing step)
+    translation_cfg: dict = cfg.get("translation", {})
+    translation_enabled: bool = bool(translation_cfg.get("enabled", False))
+    translation_provider: str = translation_cfg.get("provider", "gemini-lite")
+    translation_target_lang: str = translation_cfg.get("target_language", "sv")
+
     # Video extensions (from config or global default)
     if "video_extensions" in cfg:
         video_exts = frozenset(
@@ -1043,6 +1049,12 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                             "Done: %s → %s in %.1fs",
                             video.name, Path(result["output"]).name, elapsed,
                         )
+                        if translation_enabled:
+                            _apply_translation(
+                                video, Path(result["output"]),
+                                translation_target_lang, translation_provider,
+                                state, state_file,
+                            )
 
                 except ThermalAbortError as exc:
                     elapsed = time.monotonic() - t0
@@ -1148,6 +1160,12 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                             "Done: %s → %s in %.1fs",
                             video.name, Path(result["output"]).name, elapsed,
                         )
+                        if translation_enabled:
+                            _apply_translation(
+                                video, Path(result["output"]),
+                                translation_target_lang, translation_provider,
+                                state, state_file,
+                            )
 
                 except ThermalAbortError as exc:
                     elapsed = time.monotonic() - t0
@@ -1182,6 +1200,94 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
         n_processed, n_errors, state_file,
     )
     return 0 if n_errors == 0 else 1
+
+
+def _apply_translation(
+    video: Path,
+    srt_path: Path,
+    target_lang: str,
+    provider_name: str,
+    state: dict,
+    state_file: Path,
+) -> None:
+    """Translate *srt_path* and record the result in *state* if successful."""
+    lang_suffix = f".{target_lang}.srt"
+    if srt_path.name.endswith(lang_suffix):
+        return
+
+    try:
+        from translate.translator import translate_srt as _translate_srt
+    except ImportError:
+        logger.warning("translate module not available — skipping translation")
+        return
+
+    tr_path = _translate_srt(
+        srt_path, target_lang, provider_name, state,
+        usage_file=state_file.parent / "translate_usage.json",
+    )
+    if tr_path is not None:
+        state["processed"][str(video)]["translated"] = True
+        save_state(state, state_file)
+        logger.info("Translation written: %s", tr_path.name)
+
+
+def cmd_translate(args: argparse.Namespace) -> int:
+    """Handle standalone translate subcommand for existing SRT files."""
+    cfg: dict = {}
+    config_path = getattr(args, "config", None)
+    if config_path:
+        cfg = load_config(Path(config_path))
+
+    provider_name: str = (
+        args.provider
+        or cfg.get("translation", {}).get("provider", "gemini-lite")
+    )
+    target_lang: str = (
+        args.lang
+        or cfg.get("translation", {}).get("target_language", "sv")
+    )
+    state_file = Path(args.state_file).expanduser()
+    usage_file = state_file.parent / "translate_usage.json"
+
+    target: Path = args.path
+    if target.is_file():
+        srt_files = [target]
+    elif target.is_dir():
+        srt_files = sorted(target.rglob("*.en.srt"))
+    else:
+        logger.error("Path not found: %s", target)
+        return 1
+
+    if not srt_files:
+        logger.info("No .en.srt files found in %s", target)
+        return 0
+
+    state = load_state(state_file)
+    n_ok = 0
+    n_fail = 0
+
+    try:
+        from translate.translator import translate_srt
+    except ImportError:
+        logger.error("translate module not found — cannot run translation")
+        return 1
+
+    for srt_path in srt_files:
+        logger.info("Translating %s → %s (%s)", srt_path.name, target_lang, provider_name)
+        result = translate_srt(
+            srt_path, target_lang, provider_name, state,
+            usage_file=usage_file,
+        )
+        if result is not None:
+            n_ok += 1
+        else:
+            n_fail += 1
+
+    logger.info(
+        "Translation complete: %d translated, %d skipped/failed.",
+        n_ok, n_fail,
+    )
+    return 0 if n_fail == 0 else 1
 
 
 # ---------------------------------------------------------------------------
@@ -1343,6 +1449,49 @@ def build_parser() -> argparse.ArgumentParser:
     _add_model_args(transcribe_p, defaults=False)
 
     # ------------------------------------------------------------------
+    # translate subcommand — translate existing .en.srt files
+    # ------------------------------------------------------------------
+    translate_p = subparsers.add_parser(
+        "translate",
+        help="Translate existing .en.srt files to another language.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    translate_p.add_argument(
+        "path",
+        type=Path,
+        help="Path to a .en.srt file, or a directory to scan for .en.srt files.",
+    )
+    translate_p.add_argument(
+        "--provider",
+        default=None,
+        metavar="PROVIDER",
+        help=(
+            "Translation provider to use "
+            "(gemini-lite, gemini, openai, deepseek, anthropic). "
+            "Default: gemini-lite."
+        ),
+    )
+    translate_p.add_argument(
+        "--lang",
+        default=None,
+        metavar="LANG",
+        help="Target language ISO code (e.g. sv for Swedish). Default: sv.",
+    )
+    translate_p.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="Optional config.yml to read translation defaults from.",
+    )
+    translate_p.add_argument(
+        "--state-file",
+        default=str(DEFAULT_STATE_FILE),
+        dest="state_file",
+        metavar="PATH",
+        help="JSON state file (used to place translate_usage.json alongside it).",
+    )
+
+    # ------------------------------------------------------------------
     # Single-file mode (no subcommand) — args on the main parser
     # NOTE: no top-level "path" positional here; the legacy positional path
     # is handled by the sf_parser pre-detection in main() before argparse
@@ -1371,7 +1520,7 @@ def main() -> None:
     # even when subparsers are optional.  Pre-detect: if the first non-option
     # argument is not a known subcommand, parse with a dedicated single-file
     # parser that has no subparsers.
-    _known_subcommands = {"scan", "transcribe"}
+    _known_subcommands = {"scan", "transcribe", "translate"}
     argv = sys.argv[1:]
     first_positional = next((a for a in argv if not a.startswith("-")), None)
 
@@ -1397,6 +1546,8 @@ def main() -> None:
         sys.exit(cmd_scan(args))
     elif args.command == "transcribe":
         sys.exit(cmd_transcribe(args))
+    elif args.command == "translate":
+        sys.exit(cmd_translate(args))
     else:
         parser.print_help()
         sys.exit(1)
