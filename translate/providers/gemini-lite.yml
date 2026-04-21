@@ -1,0 +1,10 @@
+name: "Gemini Flash-Lite (Free)"
+driver: gemini
+model: gemini-2.5-flash-lite
+endpoint: https://generativelanguage.googleapis.com/v1beta/models
+api_key_env: GEMINI_API_KEY
+free_tier:
+  enabled: true
+  max_requests_per_day: 1500
+  safety_margin: 100             # stop at 1400
+  requires_billing: false

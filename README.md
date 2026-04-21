@@ -159,6 +159,165 @@ thermal:
 
 ---
 
+## Translation (optional)
+
+Translate the generated `.en.srt` subtitles to any language using an external LLM API. The recommended starting point is **Gemini Lite** — it is completely free, requires no credit card, and the code physically enforces the free-tier limit.
+
+Translation runs automatically in `scan` mode when enabled in `config.yml`, and is also available as a standalone subcommand for existing SRT files.
+
+---
+
+### Getting a free API key (Gemini)
+
+1. Go to [https://aistudio.google.com](https://aistudio.google.com)
+2. Sign in with a Google account
+3. Click **Get API key** in the left sidebar
+4. Click **Create API key** → copy the key
+5. Set the key in your shell (or add it to your Docker environment):
+
+```bash
+export GEMINI_API_KEY="your-key-here"
+```
+
+**No credit card required.**
+
+---
+
+### Lite mode
+
+| | |
+|---|---|
+| **Provider** | Gemini Flash-Lite (free tier) |
+| **Daily limit** | 1,500 requests |
+| **Hard cap in code** | 1,400 requests (100 safety margin) |
+| **One movie** | one request |
+| **Cost** | $0.00. Always. |
+
+The code hard-stops at 1,400 requests per day and resets automatically at midnight. There is **no flag, environment variable, or config override** to bypass this limit — the only way to go higher is to switch to a paid provider.
+
+**Trade-off:** Google may use free-tier requests for model training. For translating commercial movie subtitles this is not a practical concern — the content is already public.
+
+---
+
+### Config example (Lite — free)
+
+Add to `config.yml`:
+
+```yaml
+translation:
+  enabled: true
+  provider: gemini-lite
+  target_language: sv
+```
+
+Set the API key once and run as normal:
+
+```bash
+export GEMINI_API_KEY="your-key-here"
+python whisper_sub.py scan --config config.yml
+```
+
+Translated subtitles are written next to the video alongside the English subtitle:
+
+```
+Film (2021).mkv
+Film (2021).en.srt   ← Whisper output (English)
+Film (2021).sv.srt   ← translation output (Swedish)
+```
+
+---
+
+### Standalone translate subcommand
+
+Translate existing SRT files without re-running Whisper:
+
+```bash
+# Translate a single file
+python whisper_sub.py translate /path/to/film.en.srt --provider gemini-lite --lang sv
+
+# Translate all .en.srt files under a directory
+python whisper_sub.py translate /media/Movies --provider gemini-lite --lang sv
+```
+
+---
+
+### Paid providers (optional)
+
+For higher quality, privacy requirements, or higher throughput, any of these providers can be used instead of Gemini Lite.
+
+| Provider | Model | Cost/movie (approx.) | Sign up |
+|---|---|---|---|
+| Gemini (paid) | Flash 2.5 | ~$0.06 | [https://aistudio.google.com](https://aistudio.google.com) |
+| OpenAI | GPT-4.1 Nano | ~$0.01 | [https://platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| DeepSeek | V3 | ~$0.01 | [https://platform.deepseek.com](https://platform.deepseek.com) |
+| Anthropic | Haiku 4.5 | ~$0.12 | [https://console.anthropic.com](https://console.anthropic.com) |
+
+#### Gemini (paid)
+
+1. Go to [https://aistudio.google.com](https://aistudio.google.com) and sign in
+2. Click **Get API key** → **Create API key** → copy the key
+3. `export GEMINI_API_KEY="your-key-here"`
+4. Set `provider: gemini` in `config.yml`
+
+#### OpenAI
+
+1. Go to [https://platform.openai.com/api-keys](https://platform.openai.com/api-keys) and sign in
+2. Click **Create new secret key** → copy the key
+3. `export OPENAI_API_KEY="your-key-here"`
+4. Set `provider: openai` in `config.yml`
+
+#### DeepSeek
+
+1. Go to [https://platform.deepseek.com](https://platform.deepseek.com) and create an account
+2. Navigate to **API keys** → **Create API key** → copy the key
+3. `export DEEPSEEK_API_KEY="your-key-here"`
+4. Set `provider: deepseek` in `config.yml`
+
+#### Anthropic
+
+1. Go to [https://console.anthropic.com](https://console.anthropic.com) and create an account
+2. Navigate to **API keys** → **Create key** → copy the key
+3. `export ANTHROPIC_API_KEY="your-key-here"`
+4. Set `provider: anthropic` in `config.yml`
+
+---
+
+### Cost safety
+
+**Lite mode** is guaranteed free. The code refuses to make a request once the daily counter reaches 1,400. There is no override.
+
+**Paid providers** charge per token. Typical costs per full-length movie:
+
+| Provider | Cost/movie | 1 000 movies |
+|---|---|---|
+| OpenAI GPT-4.1 Nano | ~$0.01 | ~$10 |
+| DeepSeek V3 | ~$0.01 | ~$10 |
+| Gemini Flash (paid) | ~$0.06 | ~$60 |
+| Anthropic Haiku 4.5 | ~$0.12 | ~$120 |
+
+All providers offer spending limits or caps on their dashboards:
+
+- **Google / Gemini:** [https://aistudio.google.com/usage](https://aistudio.google.com/usage) — set monthly budget alerts
+- **OpenAI:** [https://platform.openai.com/settings/organization/limits](https://platform.openai.com/settings/organization/limits) — hard monthly spend limit
+- **DeepSeek:** [https://platform.deepseek.com/usage](https://platform.deepseek.com/usage) — account balance model (prepaid)
+- **Anthropic:** [https://console.anthropic.com/settings/limits](https://console.anthropic.com/settings/limits) — monthly spend limit
+
+---
+
+### Privacy
+
+| Provider | Free tier | Paid tier |
+|---|---|---|
+| Gemini Lite | Data **may** be used for model training | N/A |
+| Gemini (paid) | N/A | Data is **not** used for training |
+| OpenAI | N/A | Data is **not** used for training |
+| DeepSeek | N/A | Data is **not** used for training |
+| Anthropic | N/A | Data is **never** used for training on any tier |
+
+For translating commercial movie subtitles on the free tier, the content is already publicly distributed — this is not a practical concern.
+
+---
+
 ## CLI Arguments
 
 ### Common arguments (all subcommands)

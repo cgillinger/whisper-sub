@@ -66,6 +66,22 @@ video_extensions:
 skip_if_subtitle_exists: true
 max_files_per_run: 0       # 0 = unlimited
 
+# Translation (optional)
+# Translates the generated .en.srt subtitle to another language using an
+# external LLM API.  Runs after each successful transcription in scan mode,
+# and is also available as a standalone subcommand:
+#   python whisper_sub.py translate /media/Movies --provider gemini-lite --lang sv
+#
+# provider references a file in translate/providers/<provider>.yml
+# Providers: gemini-lite (free), gemini, openai, deepseek, anthropic
+# target_language: ISO 639-1 code (sv, en, fr, de, es, …) or full language name
+#
+# Set GEMINI_API_KEY (or the relevant env var) before enabling.
+translation:
+  enabled: false
+  provider: gemini-lite         # free tier: 1 500 req/day, hard-capped at 1 400
+  target_language: sv           # translate .en.srt → .sv.srt
+
 # Thermal throttling
 # The container reads temperatures from bind-mounted sysfs paths:
 #   CPU:  /sys/class/thermal/thermal_zone*  (zone type: x86_pkg_temp / coretemp)

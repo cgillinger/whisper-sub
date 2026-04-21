@@ -1,0 +1,7 @@
+name: "OpenAI GPT-4.1 Nano"
+driver: openai_compat
+model: gpt-4.1-nano
+endpoint: https://api.openai.com/v1/chat/completions
+api_key_env: OPENAI_API_KEY
+free_tier:
+  enabled: false
