@@ -11,6 +11,27 @@ logger = logging.getLogger(__name__)
 
 _PROVIDERS_DIR = Path(__file__).parent / "providers"
 
+
+def _load_dotenv() -> None:
+    """Read .env from the project root and populate os.environ for missing keys."""
+    env_file = Path(__file__).parent.parent / ".env"
+    try:
+        text = env_file.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
 _LANG_NAMES: dict[str, str] = {
     "sv": "Swedish",
     "en": "English",
