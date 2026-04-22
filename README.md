@@ -188,12 +188,12 @@ GEMINI_API_KEY=your-key-here
 | | |
 |---|---|
 | **Provider** | Gemini Flash-Lite (free tier) |
-| **Daily limit** | 1,500 requests |
-| **Hard cap in code** | 1,400 requests (100 safety margin) |
+| **Daily limit** | 20 requests (reduced from 1,500 in 2025) |
+| **Hard cap in code** | 18 requests (2 safety margin) |
 | **One movie** | one request |
 | **Cost** | $0.00. Always. |
 
-The code hard-stops at 1,400 requests per day and resets automatically at midnight. There is **no flag, environment variable, or config override** to bypass this limit — the only way to go higher is to switch to a paid provider.
+The code hard-stops at 18 requests per day and resets automatically at midnight. There is **no flag, environment variable, or config override** to bypass this limit — the only way to go higher is to switch to a paid provider.
 
 **Trade-off:** Google may use free-tier requests for model training. For translating commercial movie subtitles this is not a practical concern — the content is already public.
 
@@ -287,7 +287,7 @@ For higher quality, privacy requirements, or higher throughput, any of these pro
 
 ### Cost safety
 
-**Lite mode** is guaranteed free. The code refuses to make a request once the daily counter reaches 1,400. There is no override.
+**Lite mode** is guaranteed free. The code refuses to make a request once the daily counter reaches 18. There is no override.
 
 **Paid providers** charge per token. Typical costs per full-length movie:
 

@@ -1272,8 +1272,26 @@ def cmd_translate(args: argparse.Namespace) -> int:
         logger.error("translate module not found — cannot run translation")
         return 1
 
-    for srt_path in srt_files:
-        logger.info("Translating %s → %s (%s)", srt_path.name, target_lang, provider_name)
+    delay: float = getattr(args, "delay", 2.0)
+    n_skipped = 0
+
+    for i, srt_path in enumerate(srt_files):
+        # Skip if translated file already exists
+        translated_path = srt_path.with_name(
+            srt_path.name.replace(".en.srt", f".{target_lang}.srt")
+        )
+        if translated_path.exists():
+            n_skipped += 1
+            continue
+
+        if _shutdown_requested:
+            logger.info("Shutdown requested — stopping translation.")
+            break
+
+        logger.info(
+            "[%d/%d] Translating %s → %s (%s)",
+            i + 1, len(srt_files), srt_path.name, target_lang, provider_name,
+        )
         result = translate_srt(
             srt_path, target_lang, provider_name, state,
             usage_file=usage_file,
@@ -1283,9 +1301,13 @@ def cmd_translate(args: argparse.Namespace) -> int:
         else:
             n_fail += 1
 
+        # Rate-limit delay (skip after the last file)
+        if delay > 0 and i < len(srt_files) - 1:
+            time.sleep(delay)
+
     logger.info(
-        "Translation complete: %d translated, %d skipped/failed.",
-        n_ok, n_fail,
+        "Translation complete: %d translated, %d skipped (existing), %d failed.",
+        n_ok, n_skipped, n_fail,
     )
     return 0 if n_fail == 0 else 1
 
@@ -1489,6 +1511,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="state_file",
         metavar="PATH",
         help="JSON state file (used to place translate_usage.json alongside it).",
+    )
+    translate_p.add_argument(
+        "--delay",
+        type=float,
+        default=2.0,
+        metavar="SECONDS",
+        help="Delay in seconds between API calls to avoid rate limits (default: 2.0).",
     )
 
     # ------------------------------------------------------------------

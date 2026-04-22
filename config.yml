@@ -79,7 +79,7 @@ max_files_per_run: 0       # 0 = unlimited
 # Set GEMINI_API_KEY (or the relevant env var) before enabling.
 translation:
   enabled: false
-  provider: gemini-lite         # free tier: 1 500 req/day, hard-capped at 1 400
+  provider: gemini-lite         # free tier: 20 req/day (reduced by Google 2025)
   target_language: sv           # translate .en.srt → .sv.srt
 
 # Thermal throttling
