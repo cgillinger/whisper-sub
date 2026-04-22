@@ -59,8 +59,8 @@ class UsageTracker:
         if self._data.get("date") != today:
             return True
 
-        limit = free_tier.get("max_requests_per_day", 1500)
-        margin = free_tier.get("safety_margin", 100)
+        limit = free_tier.get("max_requests_per_day", 20)
+        margin = free_tier.get("safety_margin", 2)
         effective_limit = limit - margin
         current = self._data.get("requests", 0)
 
