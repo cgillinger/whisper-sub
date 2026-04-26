@@ -112,6 +112,10 @@ class ThermalAbortError(Exception):
     """Raised when a thermal pause exceeds the configured maximum duration."""
 
 
+class NoAudioStreamError(RuntimeError):
+    """Raised when a video file has no audio track."""
+
+
 def read_cpu_temp() -> Optional[float]:
     """Read CPU package temperature from sysfs thermal zones.
 
@@ -385,6 +389,33 @@ def parse_scan_paths(raw: list) -> list[tuple[Path, "PathConfig"]]:
 # ---------------------------------------------------------------------------
 
 
+def has_audio_stream(video_path: Path) -> bool:
+    """Return True if *video_path* contains at least one audio stream.
+
+    Uses ffprobe to inspect the file. Returns True (permissive) when ffprobe
+    is unavailable or fails, so that existing decode-error handling stays in
+    effect for ambiguous cases.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-select_streams", "a",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                str(video_path),
+            ],
+            capture_output=True,
+            check=True,
+        )
+        return "audio" in result.stdout.decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        return True
+    except subprocess.CalledProcessError:
+        return True
+
+
 def decode_audio_robust(video_path: Path, sampling_rate: int = 16000) -> "np.ndarray":
     """Decode a video's audio track to a 16 kHz mono float32 numpy array.
 
@@ -439,7 +470,13 @@ def detect_language(model, video_path: Path) -> tuple[str, float]:
     """Run language detection on the first ~30 seconds of the video.
 
     Returns a (language_code, probability) tuple.
+    Raises NoAudioStreamError if the file has no audio track.
     """
+    if not has_audio_stream(video_path):
+        raise NoAudioStreamError(
+            f"No audio stream found in {video_path.name}"
+            " — skipping (not a bug, file has no audio track)"
+        )
     logger.info("Detecting language from first 30 seconds of %s", video_path.name)
     audio = decode_audio_robust(video_path, sampling_rate=16000)
     clip = audio[: 16000 * 30]
@@ -713,12 +750,13 @@ def load_state(state_file: Path) -> dict:
             data = json.loads(state_file.read_text(encoding="utf-8"))
             data.setdefault("processed", {})
             data.setdefault("errors", {})
+            data.setdefault("skipped", {})
             return data
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning(
                 "Could not read state file %s: %s — starting fresh.", state_file, exc
             )
-    return {"processed": {}, "errors": {}}
+    return {"processed": {}, "errors": {}, "skipped": {}}
 
 
 def save_state(state: dict, state_file: Path) -> None:
@@ -758,11 +796,15 @@ def build_queue(videos: list[Path], state: dict, force: bool) -> list[Path]:
     - Already have a .sv.srt or .en.srt file alongside them.
     """
     processed = state.get("processed", {})
+    skipped = state.get("skipped", {})
     queue: list[Path] = []
     for video in videos:
         if not force:
             if str(video) in processed:
                 logger.debug("Skipping (already processed): %s", video.name)
+                continue
+            if str(video) in skipped:
+                logger.debug("Skipping (no audio stream): %s", video.name)
                 continue
             if has_subtitle(video):
                 logger.debug("Skipping (subtitle exists): %s", video.name)
@@ -999,6 +1041,7 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
 
     n_processed = 0
     n_errors = 0
+    n_skipped = 0
 
     try:
         if not use_kb_whisper:
@@ -1055,6 +1098,14 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                                 translation_target_lang, translation_provider,
                                 state, state_file,
                             )
+
+                except NoAudioStreamError:
+                    logger.info("Skipping %s: no audio stream", video.name)
+                    state.setdefault("skipped", {})[str(video)] = {
+                        "reason": "no_audio_stream",
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    n_skipped += 1
 
                 except ThermalAbortError as exc:
                     elapsed = time.monotonic() - t0
@@ -1167,6 +1218,14 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                                 state, state_file,
                             )
 
+                except NoAudioStreamError:
+                    logger.info("Skipping %s: no audio stream", video.name)
+                    state.setdefault("skipped", {})[str(video)] = {
+                        "reason": "no_audio_stream",
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    n_skipped += 1
+
                 except ThermalAbortError as exc:
                     elapsed = time.monotonic() - t0
                     logger.error("Thermal abort for %s after %.1fs: %s", video.name, elapsed, exc)
@@ -1196,8 +1255,8 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
             thermal.stop()
 
     logger.info(
-        "Scan complete: %d processed, %d error(s). State: %s",
-        n_processed, n_errors, state_file,
+        "Scan complete: %d processed, %d skipped (no audio), %d error(s). State: %s",
+        n_processed, n_skipped, n_errors, state_file,
     )
     return 0 if n_errors == 0 else 1
 
