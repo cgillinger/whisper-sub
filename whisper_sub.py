@@ -776,7 +776,7 @@ def find_videos(directory: Path, extensions: Optional[frozenset] = None) -> list
     exts = extensions if extensions is not None else VIDEO_EXTENSIONS
     videos: list[Path] = []
     for path in sorted(directory.rglob("*")):
-        if path.is_file() and path.suffix.lower() in exts:
+        if path.is_file() and path.suffix.lower() in exts and not path.name.startswith("original1."):
             videos.append(path)
     return videos
 
