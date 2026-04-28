@@ -165,6 +165,8 @@ Translate the generated `.en.srt` subtitles to any language using an external LL
 
 Translation runs automatically in `scan` mode when enabled in `config.yml`, and is also available as a standalone subcommand for existing SRT files.
 
+For bare-metal installs, place `.env` next to `whisper_sub.py`. For Docker, place `.env` next to `docker-compose.yml` — see the Docker section for details.
+
 ---
 
 ### Getting a free API key (Gemini)
@@ -443,6 +445,7 @@ services:
       - PUID=1000          # host user UID — written .srt files will be owned by this user
       - PGID=1000          # host group GID
       - TZ=Europe/Stockholm
+      - OPENAI_API_KEY     # read from `.env` next to docker-compose.yml (see Notes)
     volumes:
       # Media (read-write — writes .srt files alongside videos)
       - /path/to/media:/media
@@ -459,7 +462,9 @@ services:
       - /dev/dri/renderD128:/dev/dri/renderD128
     group_add:
       - "video"
-      - "render"
+      - "render"          # may need to be the numeric GID (e.g. "993") instead;
+                          # the `render` group name is not always present inside
+                          # the container, but the host GID always works.
     deploy:
       resources:
         limits:
@@ -473,16 +478,26 @@ services:
 # One-shot scan (reads config.yml automatically)
 docker compose run --rm emby-whisper
 
+# Same, but also rebuild the image if the Dockerfile or sources changed —
+# this is the recommended form for scheduled / cron runs.
+docker compose up --build
+
 # Pass custom arguments
 docker compose run --rm emby-whisper transcribe /media/Movies/film.mkv
 docker compose run --rm emby-whisper scan /media/Movies --dry-run
 ```
 
+`docker compose run --rm` and `docker compose up --build` both work for a
+one-shot scan (the container's `restart: "no"` policy ensures it exits
+after the scan completes). Use `up --build` when you want the image
+rebuilt automatically; use `run --rm` when you need to override the
+default command with custom arguments.
+
 ### Scheduling with cron
 
 ```cron
 # Run every night at 02:00
-0 2 * * * docker compose -f /path/to/whisper-sub/docker-compose.yml run --rm emby-whisper
+0 2 * * * docker compose -f /path/to/whisper-sub/docker-compose.yml up --build
 ```
 
 ### Notes
@@ -490,6 +505,8 @@ docker compose run --rm emby-whisper scan /media/Movies --dry-run
 - `PUID`/`PGID` — the entrypoint creates a `whisper` user with matching IDs and drops privileges using `gosu`, so subtitle files are owned by your host user.
 - **Model cache** — first run downloads models from Hugging Face (several GB). Subsequent runs reuse the cache.
 - **OpenVINO** — set `device: openvino` in `config.yml` and pass through `/dev/dri/renderD128`. Falls back to CPU automatically if OpenVINO fails to load a model.
+- **State file** — the entrypoint passes `--state-file /app/statedata/state.json` by default, so the volume must be mounted as a directory (`statedata:/app/statedata`), **not** as a single file (`state.json:/app/state.json`). A file bind-mount breaks the atomic write (tmp + rename) and causes `PermissionError` on every run.
+- **API keys for translation** — create a `.env` file in the same directory as `docker-compose.yml` (not inside the app/build-context directory). Docker Compose reads `.env` only from its own working directory. Format: `OPENAI_API_KEY=sk-proj-...` (one `KEY=value` per line, no quotes needed).
 
 ---
 
