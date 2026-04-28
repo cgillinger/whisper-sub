@@ -30,6 +30,7 @@ Automatic subtitle generation for Emby and Jellyfin using [faster-whisper](https
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) ≥ 1.0.0
 - `ffmpeg` on `PATH` (used by faster-whisper for audio decoding)
 - `pyyaml` ≥ 6.0 (config-file mode)
+- `requests` ≥ 2.28 (translation drivers)
 - `openvino` ≥ 2024.0 (optional — Intel iGPU acceleration)
 
 ---
@@ -362,6 +363,23 @@ python whisper_sub.py scan [directory] [options]
 | `--dry-run` | false | List files that would be processed without doing any work |
 | `--limit N` | `0` | Stop after processing N files (0 = unlimited) |
 | `--state-file PATH` | `~/.emby-whisper-state.json` | JSON file for tracking completed files |
+
+### `translate` subcommand
+
+```
+python whisper_sub.py translate <path> [options]
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `path` | *(required)* | A `.en.srt` file, or a directory to scan recursively for `.en.srt` files |
+| `--provider PROVIDER` | `gemini-lite` | Translation provider: `gemini-lite`, `gemini`, `openai`, `deepseek`, `anthropic` |
+| `--lang LANG` | `sv` | Target language ISO code (e.g. `sv`, `en`, `fr`, `de`) |
+| `--config PATH` | *(none)* | Optional `config.yml` to read translation defaults from |
+| `--state-file PATH` | `~/.emby-whisper-state.json` | State file (also determines where `translate_usage.json` is placed) |
+| `--delay SECONDS` | `2.0` | Delay between API calls to avoid rate limits |
+
+Files that already have a translated subtitle alongside them (e.g. `<name>.sv.srt` for `--lang sv`) are skipped automatically.
 
 ---
 
