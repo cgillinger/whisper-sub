@@ -5,6 +5,8 @@
 
 Automatic subtitle generation for Emby and Jellyfin using [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Detects the audio language, transcribes Swedish to `.sv.srt`, and translates everything else to `.en.srt` — files are placed alongside the video so your media server picks them up with no plugin required.
 
+> This is a personal hobby project I build for my own use and publish in case it's useful to someone else. I work on it in my spare time, so issues and PRs are welcome but replies may be slow. Use at your own risk.
+
 ---
 
 ## Features
