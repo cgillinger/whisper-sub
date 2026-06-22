@@ -217,8 +217,10 @@ Add to `config.yml`:
 translation:
   enabled: true
   provider: gemini-lite
-  target_language: sv
+  target_languages: [sv, en]   # every file gets both .sv.srt and .en.srt
 ```
+
+`target_languages` lists every language each file should end up with. The source language is whatever was transcribed, so `[sv, en]` gives a Swedish film both `.sv.srt` and `.en.srt`, and an English film the same — languages that already exist are skipped. A single `target_language: sv` string is still accepted.
 
 Add your API key to `.env` in the project directory, then run as normal:
 
@@ -383,6 +385,7 @@ python whisper_sub.py translate <path> [options]
 | `path` | *(required)* | A `.en.srt` file, or a directory to scan recursively for `.en.srt` files |
 | `--provider PROVIDER` | `gemini-lite` | Translation provider: `gemini-lite`, `gemini`, `openai`, `deepseek`, `anthropic` |
 | `--lang LANG` | `sv` | Target language ISO code (e.g. `sv`, `en`, `fr`, `de`) |
+| `--source-lang LANG` | `en` | Source subtitle language to translate FROM; picks up `*.<lang>.srt`. Use `sv` to back-fill English from Swedish transcriptions |
 | `--config PATH` | *(none)* | Optional `config.yml` to read translation defaults from |
 | `--state-file PATH` | `~/.emby-whisper-state.json` | State file (also determines where `translate_usage.json` is placed) |
 | `--delay SECONDS` | `2.0` | Delay between API calls to avoid rate limits |
