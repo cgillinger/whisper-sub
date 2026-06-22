@@ -66,6 +66,14 @@ video_extensions:
 skip_if_subtitle_exists: true
 max_files_per_run: 0       # 0 = unlimited
 
+# Error quarantine: stop re-queuing files that keep failing.
+#   - Corrupt/unreadable sources (ffmpeg can't decode) are quarantined after
+#     the first failure, regardless of this value.
+#   - Other (potentially transient) errors are quarantined after this many
+#     attempts. Thermal aborts do NOT count toward this.
+# Reattempt with `--retry-errors` (clears non-permanent errors) or `--force`.
+max_error_attempts: 2
+
 # Translation (optional)
 # Translates the generated .en.srt subtitle to another language using an
 # external LLM API.  Runs after each successful transcription in scan mode,

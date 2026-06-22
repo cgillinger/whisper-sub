@@ -22,6 +22,7 @@ Automatic subtitle generation for Emby and Jellyfin using [faster-whisper](https
 - **Graceful shutdown** — SIGTERM/SIGINT saves state after the current file so the next run continues where it left off
 - **Per-path configuration** — different VAD, confidence threshold, and fallback language per media directory
 - **State tracking** — JSON state file prevents reprocessing already-completed files
+- **Error quarantine** — files that fail because the source is corrupt/unreadable (ffmpeg can't decode) are dropped from the queue after the first failure; other errors are retried up to `max_error_attempts` times — so a cron run never gets stuck retrying the same broken files every night
 - **Docker support** — PUID/PGID privilege drop, optional Intel iGPU (OpenVINO) passthrough, model-cache volume
 
 ---
@@ -149,6 +150,10 @@ video_extensions:
 # Behaviour
 skip_if_subtitle_exists: true
 max_files_per_run: 0           # 0 = unlimited
+max_error_attempts: 2          # quarantine a file after this many non-permanent
+                               # failures; corrupt/unreadable sources are
+                               # quarantined after the first failure. Thermal
+                               # aborts never count. Reattempt with --retry-errors.
 
 # Thermal throttling
 thermal:
@@ -336,7 +341,7 @@ For translating commercial movie subtitles on the free tier, the content is alre
 | `--swedish-model` | *(none)* | Model for Swedish transcription (enables KB-Whisper, e.g. `KBLab/kb-whisper-large`) |
 | `--device` | `cpu` | Compute device: `cpu`, `cuda`, `openvino`, `auto` |
 | `--compute-type` | `int8` | Quantisation: `int8`, `float16`, `float32` |
-| `--force` | false | Overwrite existing `.srt` files and ignore state |
+| `--force` | false | Overwrite existing `.srt` files and ignore state (also re-queues quarantined files) |
 | `--vad-filter` | false | Enable Voice Activity Detection |
 | `--min-silence-duration` | `0.5` | Minimum silence in seconds for VAD splitting |
 
@@ -365,6 +370,7 @@ python whisper_sub.py scan [directory] [options]
 | `--dry-run` | false | List files that would be processed without doing any work |
 | `--limit N` | `0` | Stop after processing N files (0 = unlimited) |
 | `--state-file PATH` | `~/.emby-whisper-state.json` | JSON file for tracking completed files |
+| `--retry-errors` | false | Clear non-permanent errors before scanning so they are retried; permanent/corrupt-source errors stay quarantined |
 
 ### `translate` subcommand
 
