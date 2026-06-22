@@ -1008,7 +1008,15 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
     translation_cfg: dict = cfg.get("translation", {})
     translation_enabled: bool = bool(translation_cfg.get("enabled", False))
     translation_provider: str = translation_cfg.get("provider", "gemini-lite")
-    translation_target_lang: str = translation_cfg.get("target_language", "sv")
+    # target_languages (list) takes precedence; falls back to single
+    # target_language for backward compatibility. Each processed file ends up
+    # with a subtitle in every listed language (e.g. [sv, en] → both .sv.srt
+    # and .en.srt), translating from whichever language was transcribed.
+    translation_target_langs: list[str] = (
+        [str(lang) for lang in translation_cfg["target_languages"]]
+        if translation_cfg.get("target_languages")
+        else [translation_cfg.get("target_language", "sv")]
+    )
 
     # Video extensions (from config or global default)
     if "video_extensions" in cfg:
@@ -1170,7 +1178,7 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                         if translation_enabled:
                             _apply_translation(
                                 video, Path(result["output"]),
-                                translation_target_lang, translation_provider,
+                                translation_target_langs, translation_provider,
                                 state, state_file,
                             )
 
@@ -1291,7 +1299,7 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                         if translation_enabled:
                             _apply_translation(
                                 video, Path(result["output"]),
-                                translation_target_lang, translation_provider,
+                                translation_target_langs, translation_provider,
                                 state, state_file,
                             )
 
@@ -1343,30 +1351,39 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
 def _apply_translation(
     video: Path,
     srt_path: Path,
-    target_lang: str,
+    target_langs: list[str],
     provider_name: str,
     state: dict,
     state_file: Path,
 ) -> None:
-    """Translate *srt_path* and record the result in *state* if successful."""
-    lang_suffix = f".{target_lang}.srt"
-    if srt_path.name.endswith(lang_suffix):
-        return
+    """Ensure a subtitle exists for each language in *target_langs*.
 
-    try:
-        from translate.translator import translate_srt as _translate_srt
-    except ImportError:
-        logger.warning("translate module not available — skipping translation")
-        return
+    For every target language other than the one *srt_path* is already in,
+    translate *srt_path* and write ``<base>.<lang>.srt`` (the source language
+    is auto-detected by the provider). Languages whose output already exists
+    are skipped. Results are recorded in *state*.
+    """
+    base = srt_path.stem.rsplit(".", 1)[0] if "." in srt_path.stem else srt_path.stem
+    for target_lang in target_langs:
+        if srt_path.name.endswith(f".{target_lang}.srt"):
+            continue  # source is already in this language
+        if (srt_path.parent / f"{base}.{target_lang}.srt").exists():
+            continue  # already translated to this language
 
-    tr_path = _translate_srt(
-        srt_path, target_lang, provider_name, state,
-        usage_file=state_file.parent / "translate_usage.json",
-    )
-    if tr_path is not None:
-        state["processed"][str(video)]["translated"] = True
-        save_state(state, state_file)
-        logger.info("Translation written: %s", tr_path.name)
+        try:
+            from translate.translator import translate_srt as _translate_srt
+        except ImportError:
+            logger.warning("translate module not available — skipping translation")
+            return
+
+        tr_path = _translate_srt(
+            srt_path, target_lang, provider_name, state,
+            usage_file=state_file.parent / "translate_usage.json",
+        )
+        if tr_path is not None:
+            state["processed"][str(video)]["translated"] = True
+            save_state(state, state_file)
+            logger.info("Translation written: %s", tr_path.name)
 
 
 def cmd_translate(args: argparse.Namespace) -> int:
@@ -1384,6 +1401,8 @@ def cmd_translate(args: argparse.Namespace) -> int:
         args.lang
         or cfg.get("translation", {}).get("target_language", "sv")
     )
+    source_lang: str = getattr(args, "source_lang", None) or "en"
+    src_suffix = f".{source_lang}.srt"
     state_file = Path(args.state_file).expanduser()
     usage_file = state_file.parent / "translate_usage.json"
 
@@ -1391,13 +1410,13 @@ def cmd_translate(args: argparse.Namespace) -> int:
     if target.is_file():
         srt_files = [target]
     elif target.is_dir():
-        srt_files = sorted(target.rglob("*.en.srt"))
+        srt_files = sorted(target.rglob(f"*{src_suffix}"))
     else:
         logger.error("Path not found: %s", target)
         return 1
 
     if not srt_files:
-        logger.info("No .en.srt files found in %s", target)
+        logger.info("No %s files found in %s", src_suffix, target)
         return 0
 
     state = load_state(state_file)
@@ -1416,7 +1435,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
     for i, srt_path in enumerate(srt_files):
         # Skip if translated file already exists
         translated_path = srt_path.with_name(
-            srt_path.name.replace(".en.srt", f".{target_lang}.srt")
+            srt_path.name.replace(src_suffix, f".{target_lang}.srt")
         )
         if translated_path.exists():
             n_skipped += 1
@@ -1645,6 +1664,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="LANG",
         help="Target language ISO code (e.g. sv for Swedish). Default: sv.",
+    )
+    translate_p.add_argument(
+        "--source-lang",
+        dest="source_lang",
+        default="en",
+        metavar="LANG",
+        help=(
+            "Source subtitle language to translate FROM; selects which "
+            "*.<lang>.srt files are picked up (default: en). Use sv to "
+            "back-fill English subtitles from Swedish transcriptions."
+        ),
     )
     translate_p.add_argument(
         "--config",

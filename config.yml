@@ -75,20 +75,26 @@ max_files_per_run: 0       # 0 = unlimited
 max_error_attempts: 2
 
 # Translation (optional)
-# Translates the generated .en.srt subtitle to another language using an
-# external LLM API.  Runs after each successful transcription in scan mode,
-# and is also available as a standalone subcommand:
-#   python whisper_sub.py translate /media/Movies --provider gemini-lite --lang sv
+# After each successful transcription, ensure a subtitle exists in every
+# target language via an external LLM API. The source language is whatever
+# was transcribed; the provider auto-detects it. So with [sv, en] a Swedish
+# film (.sv.srt) also gets .en.srt, and an English film (.en.srt) also gets
+# .sv.srt. Languages that already exist are skipped.
+#
+# Also available as a standalone subcommand (e.g. back-fill English from
+# existing Swedish transcriptions):
+#   python whisper_sub.py translate /media/Movies --source-lang sv --lang en --provider openai
 #
 # provider references a file in translate/providers/<provider>.yml
 # Providers: gemini-lite (free), gemini, openai, deepseek, anthropic
-# target_language: ISO 639-1 code (sv, en, fr, de, es, …) or full language name
+# target_languages: list of ISO 639-1 codes (sv, en, fr, …). A single
+#   target_language string is still accepted for backward compatibility.
 #
-# Set GEMINI_API_KEY (or the relevant env var) before enabling.
+# Set the provider's API key env var (e.g. OPENAI_API_KEY) before enabling.
 translation:
   enabled: false
   provider: gemini-lite         # free tier: 20 req/day (reduced by Google 2025)
-  target_language: sv           # translate .en.srt → .sv.srt
+  target_languages: [sv, en]    # every file gets both .sv.srt and .en.srt
 
 # Thermal throttling
 # The container reads temperatures from bind-mounted sysfs paths:
