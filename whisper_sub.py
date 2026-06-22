@@ -51,6 +51,22 @@ VIDEO_EXTENSIONS: frozenset[str] = frozenset(
 )
 DEFAULT_STATE_FILE = Path.home() / ".emby-whisper-state.json"
 
+# Error messages containing one of these substrings mean the source file is
+# unreadable/corrupt — both PyAV and the ffmpeg CLI failed to decode it.
+# Retrying such a file every run is pointless, so it is quarantined after the
+# first failure instead of being re-queued indefinitely.
+PERMANENT_ERROR_SIGNATURES: tuple[str, ...] = (
+    "ffmpeg fallback failed",
+    "moov atom not found",
+    "EBML header parsing failed",
+    "Invalid data found when processing input",
+)
+
+# A file with a non-permanent (potentially transient) error is quarantined
+# after this many failed attempts. Overridable via config (max_error_attempts).
+# Thermal aborts are recorded without an attempt count and never quarantine.
+DEFAULT_MAX_ERROR_ATTEMPTS = 2
+
 # ---------------------------------------------------------------------------
 # Global shutdown flag — set by SIGTERM / SIGINT handler
 # ---------------------------------------------------------------------------
@@ -788,16 +804,40 @@ def has_subtitle(video_path: Path) -> bool:
     return (parent / f"{stem}.sv.srt").exists() or (parent / f"{stem}.en.srt").exists()
 
 
-def build_queue(videos: list[Path], state: dict, force: bool) -> list[Path]:
+def _is_quarantined(err: dict, max_error_attempts: int) -> bool:
+    """Return True if a recorded error means the file should not be retried.
+
+    A file is quarantined when its stored error matches a known *permanent*
+    (corrupt/unreadable source) signature, or when it has failed at least
+    *max_error_attempts* times. Thermal aborts are stored without an
+    ``attempts`` count, so they never quarantine a file.
+    """
+    message = err.get("error", "")
+    if any(sig in message for sig in PERMANENT_ERROR_SIGNATURES):
+        return True
+    return err.get("attempts", 0) >= max_error_attempts
+
+
+def build_queue(
+    videos: list[Path],
+    state: dict,
+    force: bool,
+    max_error_attempts: int = DEFAULT_MAX_ERROR_ATTEMPTS,
+) -> list[Path]:
     """Filter *videos* down to those that actually need processing.
 
     Skips files that (unless *force* is True):
     - Are already recorded as successfully processed in *state*.
+    - Are recorded as skipped (no audio stream).
+    - Are quarantined: a permanent (corrupt-source) error, or repeated
+      failures reaching *max_error_attempts*.
     - Already have a .sv.srt or .en.srt file alongside them.
     """
     processed = state.get("processed", {})
     skipped = state.get("skipped", {})
+    errors = state.get("errors", {})
     queue: list[Path] = []
+    n_quarantined = 0
     for video in videos:
         if not force:
             if str(video) in processed:
@@ -806,10 +846,23 @@ def build_queue(videos: list[Path], state: dict, force: bool) -> list[Path]:
             if str(video) in skipped:
                 logger.debug("Skipping (no audio stream): %s", video.name)
                 continue
+            err = errors.get(str(video))
+            if err is not None and _is_quarantined(err, max_error_attempts):
+                n_quarantined += 1
+                logger.debug(
+                    "Skipping (quarantined after %d attempt(s)): %s",
+                    err.get("attempts", 1), video.name,
+                )
+                continue
             if has_subtitle(video):
                 logger.debug("Skipping (subtitle exists): %s", video.name)
                 continue
         queue.append(video)
+    if n_quarantined:
+        logger.info(
+            "Quarantined %d file(s) (corrupt or repeatedly failing) — not retried. "
+            "Use --retry-errors or --force to reattempt.", n_quarantined,
+        )
     return queue
 
 
@@ -937,6 +990,9 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
     compute_type: str = args.compute_type or cfg.get("compute_type", "int8")
     limit: int = args.limit if args.limit != 0 else cfg.get("max_files_per_run", 0)
     force: bool = args.force
+    max_error_attempts: int = int(
+        cfg.get("max_error_attempts", DEFAULT_MAX_ERROR_ATTEMPTS)
+    )
     swedish_threshold: float = float(cfg.get("swedish_threshold", 0.0))
     # CLI-level VAD settings (per-path config overrides these)
     cli_vad_filter: bool = getattr(args, "vad_filter", False)
@@ -991,6 +1047,25 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
     state_file = Path(args.state_file).expanduser()
     state = load_state(state_file)
 
+    # Optional manual recovery: clear non-permanent errors so they get retried.
+    # Permanent (corrupt-source) errors stay quarantined.
+    if getattr(args, "retry_errors", False):
+        errors = state.get("errors", {})
+        cleared = [
+            path for path, err in list(errors.items())
+            if not any(
+                sig in err.get("error", "") for sig in PERMANENT_ERROR_SIGNATURES
+            )
+        ]
+        for path in cleared:
+            del errors[path]
+        if cleared:
+            save_state(state, state_file)
+        logger.info(
+            "Retry-errors: cleared %d non-permanent error(s) for retry "
+            "(permanent/corrupt entries kept).", len(cleared),
+        )
+
     # ------------------------------------------------------------------
     # 5. Build queue across all scan directories, tracking per-path config
     # ------------------------------------------------------------------
@@ -1011,7 +1086,7 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
             video_path_configs[v] = path_cfg
 
     logger.info("Total: %d video file(s) found.", len(all_videos))
-    queue = build_queue(all_videos, state, force)
+    queue = build_queue(all_videos, state, force, max_error_attempts)
     logger.info("%d file(s) queued for processing.", len(queue))
 
     if args.dry_run:
@@ -1119,8 +1194,10 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                 except Exception as exc:
                     elapsed = time.monotonic() - t0
                     logger.error("Error processing %s (%.1fs): %s", video.name, elapsed, exc)
+                    prev_err = state.get("errors", {}).get(str(video), {})
                     state.setdefault("errors", {})[str(video)] = {
                         "error": str(exc),
+                        "attempts": prev_err.get("attempts", 0) + 1,
                         "timestamp": datetime.now().isoformat(timespec="seconds"),
                     }
                     n_errors += 1
@@ -1238,8 +1315,10 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                 except Exception as exc:
                     elapsed = time.monotonic() - t0
                     logger.error("Error processing %s (%.1fs): %s", video.name, elapsed, exc)
+                    prev_err = state.get("errors", {}).get(str(video), {})
                     state.setdefault("errors", {})[str(video)] = {
                         "error": str(exc),
+                        "attempts": prev_err.get("attempts", 0) + 1,
                         "timestamp": datetime.now().isoformat(timespec="seconds"),
                     }
                     n_errors += 1
@@ -1496,6 +1575,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_STATE_FILE),
         metavar="PATH",
         help="JSON file used to track processed files across runs.",
+    )
+    scan_p.add_argument(
+        "--retry-errors",
+        action="store_true",
+        dest="retry_errors",
+        help=(
+            "Clear non-permanent errors from state before scanning so they "
+            "are retried. Permanent/corrupt-source errors stay quarantined."
+        ),
     )
     _add_model_args(scan_p, defaults=False)
 
