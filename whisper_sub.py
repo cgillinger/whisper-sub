@@ -1097,14 +1097,33 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
     queue = build_queue(all_videos, state, force, max_error_attempts)
     logger.info("%d file(s) queued for processing.", len(queue))
 
+    topup_enabled: bool = translation_enabled and len(translation_target_langs) > 1
+
     if args.dry_run:
-        print(f"\nFiles that would be processed ({len(queue)}):")
+        print(f"\nFiles that would be transcribed ({len(queue)}):")
         for video in queue:
             print(f"  {video}")
+        if topup_enabled:
+            n_cand = sum(
+                1 for _ in _topup_candidates(
+                    scan_path_entries, video_exts, translation_target_langs,
+                )
+            )
+            print(f"\nExisting subtitles to back-fill (top-up): {n_cand}")
         return 0
 
     if not queue:
-        logger.info("Nothing to do.")
+        logger.info("No new files to transcribe.")
+        n_topup = 0
+        if topup_enabled:
+            n_topup = _topup_translations(
+                scan_path_entries, video_exts, translation_target_langs,
+                translation_provider, state, state_file,
+            )
+        logger.info(
+            "Scan complete: 0 processed, 0 skipped, 0 error(s), "
+            "%d top-up. State: %s", n_topup, state_file,
+        )
         return 0
 
     # ------------------------------------------------------------------
@@ -1341,9 +1360,21 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
         if thermal is not None:
             thermal.stop()
 
+    # Self-healing pass: back-fill existing subtitles that are missing a
+    # configured target language (e.g. legacy .sv.srt files lacking .en.srt).
+    # New files transcribed above are already multi-language via
+    # _apply_translation, so they are skipped here.
+    n_topup = 0
+    if topup_enabled:
+        n_topup = _topup_translations(
+            scan_path_entries, video_exts, translation_target_langs,
+            translation_provider, state, state_file,
+        )
+
     logger.info(
-        "Scan complete: %d processed, %d skipped (no audio), %d error(s). State: %s",
-        n_processed, n_skipped, n_errors, state_file,
+        "Scan complete: %d processed, %d skipped (no audio), %d error(s), "
+        "%d top-up. State: %s",
+        n_processed, n_skipped, n_errors, n_topup, state_file,
     )
     return 0 if n_errors == 0 else 1
 
@@ -1384,6 +1415,95 @@ def _apply_translation(
             state["processed"][str(video)]["translated"] = True
             save_state(state, state_file)
             logger.info("Translation written: %s", tr_path.name)
+
+
+def _topup_candidates(
+    scan_path_entries: list[tuple[Path, PathConfig]],
+    video_exts: frozenset,
+    target_langs: list[str],
+):
+    """Yield (source_srt, source_lang, target_lang) tuples for back-fill.
+
+    Walks the scan directories and, for every video that already has at least
+    one target-language subtitle but is missing one or more others, yields the
+    work needed to fill the gaps. Translating these requires no
+    re-transcription — only an existing ``<base>.<lang>.srt`` as the source.
+    """
+    for d, _ in scan_path_entries:
+        if not d.is_dir():
+            continue
+        for video in find_videos(d, extensions=video_exts):
+            stem, parent = video.stem, video.parent
+            present = [
+                lang for lang in target_langs
+                if (parent / f"{stem}.{lang}.srt").exists()
+            ]
+            if not present:
+                continue  # nothing to translate from (not yet transcribed)
+            source_lang = present[0]
+            source_srt = parent / f"{stem}.{source_lang}.srt"
+            for target_lang in target_langs:
+                if target_lang not in present:
+                    yield source_srt, source_lang, target_lang
+
+
+def _topup_translations(
+    scan_path_entries: list[tuple[Path, PathConfig]],
+    video_exts: frozenset,
+    target_langs: list[str],
+    provider_name: str,
+    state: dict,
+    state_file: Path,
+) -> int:
+    """Self-healing back-fill of existing subtitles into every target language.
+
+    For files that already have a subtitle in one language but lack another
+    configured target language, translate the existing subtitle instead of
+    re-transcribing. Idempotent (skips languages whose output exists, since a
+    just-written file disappears from the next candidate's *present* set) and
+    interruptible (honours shutdown signals — safe to resume across the
+    nightly up-windows). Returns the number of subtitles written.
+    """
+    if len(target_langs) < 2:
+        return 0  # a single target language has nothing to back-fill into
+    translate_srt = None
+    usage_file = state_file.parent / "translate_usage.json"
+    n_written = 0
+    for source_srt, source_lang, target_lang in _topup_candidates(
+        scan_path_entries, video_exts, target_langs,
+    ):
+        if _shutdown_requested:
+            logger.info(
+                "Shutdown requested — stopping top-up after %d subtitle(s).",
+                n_written,
+            )
+            break
+        # Re-check: an earlier candidate in this run may have written it.
+        if source_srt.with_name(
+            f"{source_srt.stem.rsplit('.', 1)[0]}.{target_lang}.srt"
+        ).exists():
+            continue
+        if translate_srt is None:
+            try:
+                from translate.translator import translate_srt as _ts
+                translate_srt = _ts
+            except ImportError:
+                logger.warning(
+                    "translate module not available — skipping top-up"
+                )
+                return n_written
+        logger.info(
+            "Top-up: %s (%s → %s)", source_srt.name, source_lang, target_lang,
+        )
+        tr_path = translate_srt(
+            source_srt, target_lang, provider_name, state, usage_file=usage_file,
+        )
+        if tr_path is not None:
+            n_written += 1
+            save_state(state, state_file)
+    if n_written:
+        logger.info("Top-up complete: %d subtitle(s) back-filled.", n_written)
+    return n_written
 
 
 def cmd_translate(args: argparse.Namespace) -> int:
