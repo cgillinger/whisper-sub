@@ -222,6 +222,8 @@ translation:
 
 `target_languages` lists every language each file should end up with. The source language is whatever was transcribed, so `[sv, en]` gives a Swedish film both `.sv.srt` and `.en.srt`, and an English film the same — languages that already exist are skipped. A single `target_language: sv` string is still accepted.
 
+Each `scan` run ends with a self-healing **top-up** pass: any video that already has a subtitle in one target language but is missing another gets the gap filled by translating the existing subtitle — no re-transcription. This back-fills legacy files (e.g. `.sv.srt` predating a `[sv, en]` config) without a separate command. It is idempotent and honours shutdown signals, so it resumes safely across nightly up-windows. `scan --dry-run` reports how many subtitles would be backfilled.
+
 Add your API key to `.env` in the project directory, then run as normal:
 
 ```
