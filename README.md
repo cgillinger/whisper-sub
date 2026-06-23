@@ -224,6 +224,8 @@ translation:
 
 Each `scan` run ends with a self-healing **top-up** pass: any video that already has a subtitle in one target language but is missing another gets the gap filled by translating the existing subtitle — no re-transcription. This back-fills legacy files (e.g. `.sv.srt` predating a `[sv, en]` config) without a separate command. It is idempotent and honours shutdown signals, so it resumes safely across nightly up-windows. `scan --dry-run` reports how many subtitles would be backfilled.
 
+To keep a scan path **local-only** — transcribed on-device but never sent to the cloud translation provider — set `translate: false` on its `scan_paths` entry. Such paths are excluded from both forward translation and the top-up pass; only their `.srt` in the transcribed language is produced. Useful for private material (e.g. home videos) you don't want leaving the machine.
+
 Add your API key to `.env` in the project directory, then run as normal:
 
 ```

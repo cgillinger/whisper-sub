@@ -358,6 +358,7 @@ class PathConfig:
     vad_filter: bool = False
     min_silence_duration: float = 0.5   # seconds; converted to ms for faster-whisper
     default_language: Optional[str] = None  # language code used when confidence is low
+    translate: bool = True  # when False, skip cloud translation (forward + top-up)
 
 
 def parse_scan_paths(raw: list) -> list[tuple[Path, "PathConfig"]]:
@@ -379,6 +380,7 @@ def parse_scan_paths(raw: list) -> list[tuple[Path, "PathConfig"]]:
             min_confidence: 0.5
             vad_filter: true
             default_language: sv
+            translate: false   # keep these local-only — no cloud translation
     """
     result: list[tuple[Path, PathConfig]] = []
     for entry in raw:
@@ -393,6 +395,7 @@ def parse_scan_paths(raw: list) -> list[tuple[Path, "PathConfig"]]:
                 vad_filter=bool(entry.get("vad_filter", False)),
                 min_silence_duration=float(entry.get("min_silence_duration", 0.5)),
                 default_language=entry.get("default_language"),
+                translate=bool(entry.get("translate", True)),
             )
             result.append((p, cfg))
         else:
@@ -1194,7 +1197,8 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                             "Done: %s → %s in %.1fs",
                             video.name, Path(result["output"]).name, elapsed,
                         )
-                        if translation_enabled:
+                        pc = video_path_configs.get(video)
+                        if translation_enabled and (pc is None or pc.translate):
                             _apply_translation(
                                 video, Path(result["output"]),
                                 translation_target_langs, translation_provider,
@@ -1315,7 +1319,8 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                             "Done: %s → %s in %.1fs",
                             video.name, Path(result["output"]).name, elapsed,
                         )
-                        if translation_enabled:
+                        pc = video_path_configs.get(video)
+                        if translation_enabled and (pc is None or pc.translate):
                             _apply_translation(
                                 video, Path(result["output"]),
                                 translation_target_langs, translation_provider,
@@ -1429,9 +1434,11 @@ def _topup_candidates(
     work needed to fill the gaps. Translating these requires no
     re-transcription — only an existing ``<base>.<lang>.srt`` as the source.
     """
-    for d, _ in scan_path_entries:
+    for d, path_cfg in scan_path_entries:
         if not d.is_dir():
             continue
+        if not path_cfg.translate:
+            continue  # path opted out of cloud translation
         for video in find_videos(d, extensions=video_exts):
             stem, parent = video.stem, video.parent
             present = [
