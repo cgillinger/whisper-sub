@@ -37,6 +37,11 @@ scan_paths:
 # To disable KB-Whisper, remove swedish_model or set it equal to default_model.
 default_model: large-v3
 swedish_model: KBLab/kb-whisper-large
+# Optional revision (Hugging Face branch) for the Swedish model.
+#   subtitle — condensed output, tuned for subtitles (recommended for .srt)
+#   strict   — verbatim, keeps every word (good for protocols/interviews)
+#   (omit)   — default revision, balanced
+# swedish_model_revision: subtitle
 
 # OpenVINO (Phase 5): uses the Intel iGPU (UHD 730) for 2-4x faster
 # transcription.  Requires /dev/dri/renderD128 passed through in
