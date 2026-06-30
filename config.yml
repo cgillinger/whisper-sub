@@ -43,6 +43,12 @@ swedish_model: KBLab/kb-whisper-large
 #   (omit)   — default revision, balanced
 # swedish_model_revision: subtitle
 
+# Optional label inserted before the .srt extension (e.g. kbsub →
+# Movie.sv.kbsub.srt). Lets a run write alongside existing untagged
+# subtitles instead of overwriting them; skip/resume keys on the tagged
+# name. Also settable per-run via --output-tag. Omit for plain .sv.srt.
+# output_tag: kbsub
+
 # OpenVINO (Phase 5): uses the Intel iGPU (UHD 730) for 2-4x faster
 # transcription.  Requires /dev/dri/renderD128 passed through in
 # docker-compose.yml.  Falls back to CPU automatically if OpenVINO fails
