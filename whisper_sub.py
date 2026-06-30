@@ -512,11 +512,24 @@ def detect_language(model, video_path: Path) -> tuple[str, float]:
     return info.language, info.language_probability
 
 
+def build_suffix(lang_code: str, output_tag: Optional[str] = None) -> str:
+    """Build the SRT filename suffix for *lang_code*.
+
+    Without *output_tag* this is the canonical ``.sv.srt`` / ``.en.srt``.
+    With a tag the tag is inserted before the extension (``.sv.kbsub.srt``),
+    so a tagged run writes alongside the untagged subtitles instead of
+    overwriting them. Emby/Jellyfin reads the language code and treats the
+    extra token as the subtitle track's title.
+    """
+    return f".{lang_code}.{output_tag}.srt" if output_tag else f".{lang_code}.srt"
+
+
 def detect_file_language(
     model,
     video_path: Path,
     swedish_threshold: float = 0.0,
     path_config: Optional[PathConfig] = None,
+    output_tag: Optional[str] = None,
 ) -> dict:
     """Detect language for a single file and determine the appropriate task.
 
@@ -526,6 +539,8 @@ def detect_file_language(
       ``path_config.default_language`` is set, the default language is used
       instead of the detected one (useful for home videos where audio quality
       is poor and Whisper may misidentify the language).
+
+    *output_tag* inserts a label into the output filename (see build_suffix).
 
     Returns a dict with keys: language, probability, task, suffix.
     """
@@ -551,10 +566,10 @@ def detect_file_language(
 
     if effective_language == "sv" and probability >= threshold:
         task = "transcribe"
-        suffix = ".sv.srt"
+        suffix = build_suffix("sv", output_tag)
     else:
         task = "translate"
-        suffix = ".en.srt"
+        suffix = build_suffix("en", output_tag)
 
     return {
         "language": effective_language,
@@ -562,6 +577,21 @@ def detect_file_language(
         "task": task,
         "suffix": suffix,
     }
+
+
+def forced_detection(language: str, output_tag: Optional[str] = None) -> dict:
+    """Build a detection result that skips Whisper language detection.
+
+    Used by ``--force-language`` when the caller already knows the spoken
+    language (e.g. a curated list of Swedish titles). ``sv`` transcribes with
+    the Swedish model; any other language is translated to English — matching
+    the task/suffix rules of detect_file_language.
+    """
+    if language == "sv":
+        return {"language": "sv", "probability": 1.0, "task": "transcribe",
+                "suffix": build_suffix("sv", output_tag)}
+    return {"language": language, "probability": 1.0, "task": "translate",
+            "suffix": build_suffix("en", output_tag)}
 
 
 def transcribe_file(
@@ -737,12 +767,16 @@ def _process_one(
     path_config: Optional[PathConfig] = None,
     vad_filter: bool = False,
     min_silence_duration: float = 0.5,
+    output_tag: Optional[str] = None,
+    force_language: Optional[str] = None,
 ) -> dict:
     """Detect language and process a single video with a pre-loaded model.
 
     Used by single-model mode (single-file command and non-KB-Whisper scan).
     Per-path VAD and confidence settings from *path_config* override the
     global *vad_filter* / *swedish_threshold* values when provided.
+    *output_tag* labels the output filename; *force_language* bypasses
+    detection and transcribes in the given language.
     Returns a result dict with keys: language, task, output, skipped.
     Raises on errors so callers can decide how to handle them.
     """
@@ -752,9 +786,13 @@ def _process_one(
         path_config.min_silence_duration if path_config is not None else min_silence_duration
     )
 
-    det = detect_file_language(
-        model, video_path, swedish_threshold, path_config=path_config
-    )
+    if force_language:
+        det = forced_detection(force_language, output_tag)
+    else:
+        det = detect_file_language(
+            model, video_path, swedish_threshold, path_config=path_config,
+            output_tag=output_tag,
+        )
 
     output_path = video_path.parent / f"{video_path.stem}{det['suffix']}"
 
@@ -823,11 +861,19 @@ def find_videos(directory: Path, extensions: Optional[frozenset] = None) -> list
     return videos
 
 
-def has_subtitle(video_path: Path) -> bool:
-    """Return True if a .sv.srt or .en.srt file exists alongside the video."""
+def has_subtitle(video_path: Path, output_tag: Optional[str] = None) -> bool:
+    """Return True if a Swedish or English subtitle exists alongside the video.
+
+    With *output_tag* the check is for the *tagged* names (e.g.
+    ``.sv.kbsub.srt``) only, so a tagged run ignores pre-existing untagged
+    subtitles and stays idempotent on its own output across resumed runs.
+    """
     stem = video_path.stem
     parent = video_path.parent
-    return (parent / f"{stem}.sv.srt").exists() or (parent / f"{stem}.en.srt").exists()
+    return any(
+        (parent / f"{stem}{build_suffix(lang, output_tag)}").exists()
+        for lang in ("sv", "en")
+    )
 
 
 def _is_quarantined(err: dict, max_error_attempts: int) -> bool:
@@ -849,6 +895,7 @@ def build_queue(
     state: dict,
     force: bool,
     max_error_attempts: int = DEFAULT_MAX_ERROR_ATTEMPTS,
+    output_tag: Optional[str] = None,
 ) -> list[Path]:
     """Filter *videos* down to those that actually need processing.
 
@@ -880,7 +927,7 @@ def build_queue(
                     err.get("attempts", 1), video.name,
                 )
                 continue
-            if has_subtitle(video):
+            if has_subtitle(video, output_tag):
                 logger.debug("Skipping (subtitle exists): %s", video.name)
                 continue
         queue.append(video)
@@ -1020,6 +1067,9 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
     use_kb_whisper = bool(
         swedish_model_name and swedish_model_name != default_model_name
     )
+    # Output filename label (e.g. "kbsub") and detection bypass.
+    output_tag: Optional[str] = getattr(args, "output_tag", None) or cfg.get("output_tag")
+    force_language: Optional[str] = getattr(args, "force_language", None)
 
     device: str = args.device or cfg.get("device", "cpu")
     compute_type: str = args.compute_type or cfg.get("compute_type", "int8")
@@ -1115,22 +1165,47 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
     # ------------------------------------------------------------------
     all_videos: list[Path] = []
     video_path_configs: dict[Path, PathConfig] = {}
-    for d, path_cfg in scan_path_entries:
-        if not d.is_dir():
-            logger.warning("Scan path not found or not a directory: %s", d)
-            continue
-        logger.info(
-            "Scanning %s (vad=%s min_confidence=%s default_language=%s)...",
-            d, path_cfg.vad_filter, path_cfg.min_confidence, path_cfg.default_language,
+    files_from: Optional[str] = getattr(args, "files_from", None)
+    if files_from:
+        # Explicit file list overrides directory walking. Each listed file
+        # inherits the matching scan_paths config (for VAD), else a default
+        # built from CLI VAD settings.
+        list_path = Path(files_from).expanduser()
+        listed = [
+            Path(line.strip()) for line in list_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        default_cfg = PathConfig(
+            path=Path("/"), vad_filter=cli_vad_filter,
+            min_silence_duration=cli_min_silence,
         )
-        found = find_videos(d, extensions=video_exts)
-        logger.info("  %d video file(s) found in %s", len(found), d)
-        all_videos.extend(found)
-        for v in found:
-            video_path_configs[v] = path_cfg
+        for v in listed:
+            if not v.is_file():
+                logger.warning("Listed file not found, skipping: %s", v)
+                continue
+            match = next(
+                (pc for d, pc in scan_path_entries if d in v.parents), default_cfg
+            )
+            all_videos.append(v)
+            video_path_configs[v] = match
+        logger.info("Files-from %s: %d listed, %d found.", list_path, len(listed), len(all_videos))
+    else:
+        for d, path_cfg in scan_path_entries:
+            if not d.is_dir():
+                logger.warning("Scan path not found or not a directory: %s", d)
+                continue
+            logger.info(
+                "Scanning %s (vad=%s min_confidence=%s default_language=%s)...",
+                d, path_cfg.vad_filter, path_cfg.min_confidence, path_cfg.default_language,
+            )
+            found = find_videos(d, extensions=video_exts)
+            logger.info("  %d video file(s) found in %s", len(found), d)
+            all_videos.extend(found)
+            for v in found:
+                video_path_configs[v] = path_cfg
 
     logger.info("Total: %d video file(s) found.", len(all_videos))
-    queue = build_queue(all_videos, state, force, max_error_attempts)
+    queue = build_queue(all_videos, state, force, max_error_attempts, output_tag)
     logger.info("%d file(s) queued for processing.", len(queue))
 
     topup_enabled: bool = translation_enabled and len(translation_target_langs) > 1
@@ -1213,6 +1288,8 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                         thermal=thermal,
                         swedish_threshold=swedish_threshold,
                         path_config=video_path_configs.get(video),
+                        output_tag=output_tag,
+                        force_language=force_language,
                     )
                     elapsed = time.monotonic() - t0
 
@@ -1296,20 +1373,32 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
 
                 logger.info("[%d/%d] %s", i, len(queue), video.name)
 
-                # Load the default model on the first iteration.
+                # Load a model on the first iteration. With --force-language sv
+                # we skip detection entirely, so load the Swedish model directly
+                # and never pull the default (large-v3) model at all.
                 if current_model_obj is None:
-                    current_model_name = default_model_name
-                    current_model_obj = load_model(default_model_name, device, compute_type)
+                    if force_language == "sv":
+                        current_model_name = swedish_model_name
+                        current_model_obj = load_model(
+                            swedish_model_name, device, compute_type,
+                            revision=swedish_model_revision,
+                        )
+                    else:
+                        current_model_name = default_model_name
+                        current_model_obj = load_model(default_model_name, device, compute_type)
 
                 t0 = time.monotonic()
                 try:
                     path_cfg: Optional[PathConfig] = video_path_configs.get(video)
 
-                    # Step 1: detect language with the currently loaded model.
-                    det = detect_file_language(
-                        current_model_obj, video, swedish_threshold,
-                        path_config=path_cfg,
-                    )
+                    # Step 1: detect language (or use the forced language).
+                    if force_language:
+                        det = forced_detection(force_language, output_tag)
+                    else:
+                        det = detect_file_language(
+                            current_model_obj, video, swedish_threshold,
+                            path_config=path_cfg, output_tag=output_tag,
+                        )
 
                     # Step 2: determine the correct model for transcription.
                     needed_model_name = (
@@ -1784,6 +1873,40 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Clear non-permanent errors from state before scanning so they "
             "are retried. Permanent/corrupt-source errors stay quarantined."
+        ),
+    )
+    scan_p.add_argument(
+        "--files-from",
+        default=None,
+        dest="files_from",
+        metavar="PATH",
+        help=(
+            "Read an explicit newline-separated list of video files to process "
+            "instead of walking scan_paths/<directory>. Blank lines and lines "
+            "starting with '#' are ignored. Useful for a curated batch."
+        ),
+    )
+    scan_p.add_argument(
+        "--output-tag",
+        default=None,
+        dest="output_tag",
+        metavar="TAG",
+        help=(
+            "Insert a label before the .srt extension (e.g. 'kbsub' → "
+            ".sv.kbsub.srt). Lets a run write alongside existing untagged "
+            "subtitles instead of overwriting them, and the skip/resume check "
+            "keys on the tagged name. Also settable via config (output_tag)."
+        ),
+    )
+    scan_p.add_argument(
+        "--force-language",
+        default=None,
+        dest="force_language",
+        metavar="LANG",
+        help=(
+            "Bypass Whisper language detection and force this language for "
+            "every file. 'sv' transcribes with the Swedish model; anything "
+            "else translates to English. Use with a curated --files-from list."
         ),
     )
     _add_model_args(scan_p, defaults=False)
