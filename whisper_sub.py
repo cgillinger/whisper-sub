@@ -616,28 +616,42 @@ def transcribe_file(
     return segments
 
 
-def load_model(model_name: str, device: str, compute_type: str):
+def load_model(
+    model_name: str,
+    device: str,
+    compute_type: str,
+    revision: Optional[str] = None,
+):
     """Load a faster-whisper WhisperModel.
 
     When *device* is ``"openvino"`` the first call attempts OpenVINO.  If
     that fails the module-level flag ``_openvino_available`` is set to False
     and a single warning is logged; all subsequent calls skip OpenVINO and
     use CPU directly without further warnings.
+
+    *revision* selects a specific model revision (git branch/tag on the
+    Hugging Face repo). KB-Whisper publishes ``subtitle`` (condensed, tuned
+    for subtitles) and ``strict`` (verbatim) variants this way; ``None``
+    uses the default revision.
     """
     global _openvino_available
     from faster_whisper import WhisperModel
 
     logger.info(
-        "Loading model=%s device=%s compute_type=%s",
+        "Loading model=%s device=%s compute_type=%s revision=%s",
         model_name,
         device,
         compute_type,
+        revision or "default",
     )
 
     if device == "openvino":
         if _openvino_available:
             try:
-                return WhisperModel(model_name, device=device, compute_type=compute_type)
+                return WhisperModel(
+                    model_name, device=device, compute_type=compute_type,
+                    revision=revision,
+                )
             except Exception as exc:
                 logger.warning(
                     "OpenVINO unavailable for model=%s (%s) — "
@@ -646,11 +660,20 @@ def load_model(model_name: str, device: str, compute_type: str):
                     exc,
                 )
                 _openvino_available = False
-                return WhisperModel(model_name, device="cpu", compute_type=compute_type)
+                return WhisperModel(
+                    model_name, device="cpu", compute_type=compute_type,
+                    revision=revision,
+                )
         # OpenVINO already known to be unavailable — use CPU without re-logging.
-        return WhisperModel(model_name, device="cpu", compute_type=compute_type)
+        return WhisperModel(
+            model_name, device="cpu", compute_type=compute_type,
+            revision=revision,
+        )
 
-    return WhisperModel(model_name, device=device, compute_type=compute_type)
+    return WhisperModel(
+        model_name, device=device, compute_type=compute_type,
+        revision=revision,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -901,6 +924,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         or cfg.get("model", "large-v3")
     )
     swedish_model_name: Optional[str] = args.swedish_model or cfg.get("swedish_model")
+    swedish_model_revision: Optional[str] = (
+        args.swedish_model_revision or cfg.get("swedish_model_revision")
+    )
     device: str = args.device or cfg.get("device", "cpu")
     compute_type: str = args.compute_type or cfg.get("compute_type", "int8")
     swedish_threshold: float = float(cfg.get("swedish_threshold", 0.0))
@@ -936,7 +962,10 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             if det["task"] == "transcribe":
                 # Swedish: swap to KB-Whisper model.
                 del det_model
-                sv_model = load_model(swedish_model_name, device, compute_type)
+                sv_model = load_model(
+                    swedish_model_name, device, compute_type,
+                    revision=swedish_model_revision,
+                )
                 _transcribe_and_write(
                     video_path, sv_model,
                     det["language"], det["task"], det["suffix"],
@@ -985,6 +1014,9 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
     swedish_model_name: Optional[str] = (
         args.swedish_model or cfg.get("swedish_model")
     )
+    swedish_model_revision: Optional[str] = (
+        args.swedish_model_revision or cfg.get("swedish_model_revision")
+    )
     use_kb_whisper = bool(
         swedish_model_name and swedish_model_name != default_model_name
     )
@@ -1003,8 +1035,9 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
 
     if use_kb_whisper:
         logger.info(
-            "KB-Whisper mode: default_model=%s swedish_model=%s",
+            "KB-Whisper mode: default_model=%s swedish_model=%s revision=%s",
             default_model_name, swedish_model_name,
+            swedish_model_revision or "default",
         )
 
     # Translation (optional post-processing step)
@@ -1289,8 +1322,19 @@ def cmd_scan(args: argparse.Namespace) -> int:  # noqa: C901
                             "Model swap: %s → %s (language=%s)",
                             current_model_name, needed_model_name, det["language"],
                         )
+                        # Apply the configured revision only to the Swedish
+                        # (KB-Whisper) model — the default model has no such
+                        # subtitle/strict variants.
+                        needed_revision = (
+                            swedish_model_revision
+                            if needed_model_name == swedish_model_name
+                            else None
+                        )
                         del current_model_obj
-                        current_model_obj = load_model(needed_model_name, device, compute_type)
+                        current_model_obj = load_model(
+                            needed_model_name, device, compute_type,
+                            revision=needed_revision,
+                        )
                         current_model_name = needed_model_name
 
                     # Step 4: transcribe / translate.
@@ -1628,6 +1672,17 @@ def _add_model_args(parser: argparse.ArgumentParser, defaults: bool = True) -> N
             "detect all languages first, then transcribe Swedish with this model "
             "and translate everything else with --model. "
             "Example: KBLab/kb-whisper-large"
+        ),
+    )
+    parser.add_argument(
+        "--swedish-model-revision",
+        default=None,
+        dest="swedish_model_revision",
+        metavar="REVISION",
+        help=(
+            "Model revision (Hugging Face branch/tag) for the Swedish model. "
+            "KB-Whisper offers 'subtitle' (condensed, tuned for subtitles) and "
+            "'strict' (verbatim). Omit for the default revision."
         ),
     )
     parser.add_argument(
